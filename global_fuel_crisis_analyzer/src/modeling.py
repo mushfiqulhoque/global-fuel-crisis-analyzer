@@ -117,7 +117,7 @@ class BaselineLinear:
         return self
 
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
-        X = df_test[self.features].fillna(method="ffill").fillna(0)
+        X = df_test[self.features].ffill().fillna(0)  # FIXED: was fillna(method="ffill")
         return self.model.predict(X)
 
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
@@ -253,7 +253,7 @@ class RandomForestModel:
         return self
 
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
-        X = df_test[self.features].fillna(method="ffill").fillna(0)
+        X = df_test[self.features].ffill().fillna(0)  # FIXED: was fillna(method="ffill")
         return self.model.predict(X)
 
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
