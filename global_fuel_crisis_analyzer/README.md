@@ -216,7 +216,7 @@ Visit `http://localhost:8501` in your browser.
 
 ## 👤 Author
 
-**[Your Name]** — Data Scientist  
+**[Md Mushfiqul Hoque]** — Data Scientist  
 Built as a portfolio project demonstrating end-to-end data science engineering for MS programme applications and industry roles.
 
 ---
