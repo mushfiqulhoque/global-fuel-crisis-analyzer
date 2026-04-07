@@ -13,3 +13,4 @@ matplotlib>=3.7.0
 seaborn>=0.12.0
 loguru
 python-dotenv
+textblob
