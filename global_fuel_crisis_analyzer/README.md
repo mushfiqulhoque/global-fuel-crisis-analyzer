@@ -223,4 +223,6 @@ Built as a portfolio project demonstrating end-to-end data science engineering f
 
 ## 📝 License
 
-MIT License — see [LICENSE](LICENSE) for details.
+## 📋 License
+
+This project is free and open source — created by **Md Mushfiqul Hoque**.
