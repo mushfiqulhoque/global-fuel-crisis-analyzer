@@ -406,8 +406,16 @@ def tab_models(master_df: pd.DataFrame) -> None:
             try:
                 from preprocessing import get_train_test
                 from modeling import ModelComparison
+                from config import TRAIN_TEST_SPLIT_DATE
 
                 master_df_clean = master_df.replace([np.inf, -np.inf], np.nan)
+
+                # Add split column if missing (happens with synthetic fallback data)
+                if "split" not in master_df_clean.columns:
+                    master_df_clean["split"] = np.where(
+                        master_df_clean.index < TRAIN_TEST_SPLIT_DATE, "train", "test"
+                    )
+
                 train, test = get_train_test(master_df_clean)
                 mc = ModelComparison()
                 metrics_df, preds_df = mc.run(train, test, fit_arima=False)
