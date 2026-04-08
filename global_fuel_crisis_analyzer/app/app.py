@@ -519,13 +519,13 @@ def tab_sentiment() -> None:
                                    yaxis_title="Polarity Score")
             st.plotly_chart(fig_line, use_container_width=True)
 
-        # Headline table
+        # Headline table — fixed: use .map() instead of deprecated .applymap()
         st.subheader("Headline Details")
         display_cols = [c for c in ["date", "source", "headline", "polarity", "label"] if c in scored.columns]
         st.dataframe(
             scored[display_cols]
             .sort_values("date", ascending=False)
-            .style.applymap(
+            .style.map(
                 lambda v: "color: #4CAF50" if v == "positive" else
                           ("color: #F44336" if v == "negative" else ""),
                 subset=["label"],
