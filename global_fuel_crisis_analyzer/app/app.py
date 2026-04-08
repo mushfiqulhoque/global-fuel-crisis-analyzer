@@ -580,7 +580,7 @@ def tab_sentiment() -> None:
         st.dataframe(
             scored[display_cols]
             .sort_values("date", ascending=False)
-            .style.applymap(
+            .style.map(                                          # ← FIXED (was applymap)
                 lambda v: "color: #4CAF50" if v == "positive" else
                           ("color: #F44336" if v == "negative" else ""),
                 subset=["label"],
