@@ -91,50 +91,95 @@ def load_master() -> pd.DataFrame:
     if master_path.exists():
         df = pd.read_csv(master_path, index_col="date", parse_dates=True)
         return df
-    # Synthetic fallback so the dashboard works without running the pipeline
     logger.warning("master.csv not found — generating synthetic oil price data.")
     return _synthetic_master()
 
 
 def _synthetic_master() -> pd.DataFrame:
-    """Generate realistic synthetic oil price data for demo purposes."""
+    """
+    Generate realistic synthetic oil price data 2000–2026.
+
+    Geopolitical events modelled:
+      • 2008 GFC spike & crash
+      • 2014–2016 OPEC price war
+      • 2020 COVID crash & recovery
+      • 2022 Russia–Ukraine war spike
+      • 2023 Israel–Hamas war (Oct 7 attack) — moderate Brent premium
+      • 2024 Iran–Israel direct strikes (Apr & Oct) — sharp short spikes
+      • 2025 US–Iran tensions / Red Sea disruption continuation
+      • 2025–2026 gradual normalisation as diplomatic channels open
+    """
     rng   = np.random.default_rng(42)
-    dates = pd.date_range("2000-01-01", "2024-06-01", freq="MS")
+    dates = pd.date_range("2000-01-01", "2026-03-01", freq="MS")
     n     = len(dates)
 
-    # Simulate a mean-reverting price with regime breaks
+    # Base mean-reverting price process (long-run mean ~$72)
     price = np.zeros(n)
     price[0] = 30.0
     for i in range(1, n):
-        shock  = rng.normal(0, 2.5)
-        trend  = 0.15
-        revert = -0.05 * (price[i - 1] - 75)  # mean-revert to ~$75
+        shock  = rng.normal(0, 2.8)
+        trend  = 0.10
+        revert = -0.04 * (price[i - 1] - 72)
         price[i] = max(price[i - 1] + trend + revert + shock, 10)
 
-    # Inject known events
-    for start, end, bump in [
-        ("2008-06-01", "2008-12-01", 60), ("2020-03-01", "2020-06-01", -40),
-        ("2022-02-01", "2022-10-01", 35),
-    ]:
+    # ── Inject known historical & recent events ────────────────────────────────
+    events = [
+        # (start, end, price_bump, label)
+        ("2007-06-01", "2008-07-31",  55,  "GFC run-up"),
+        ("2008-08-01", "2008-12-31", -60,  "GFC crash"),
+        ("2011-01-01", "2012-06-30",  25,  "Arab Spring"),
+        ("2014-07-01", "2016-03-31", -45,  "OPEC price war"),
+        ("2018-10-01", "2018-12-31",  15,  "Iran sanctions"),
+        ("2020-02-01", "2020-04-30", -48,  "COVID crash"),
+        ("2020-05-01", "2021-06-30",  22,  "COVID recovery"),
+        ("2022-02-01", "2022-08-31",  40,  "Ukraine war spike"),
+        ("2022-09-01", "2022-12-31",  -8,  "Ukraine partial retreat"),
+        # ── Middle East escalation cycle 2023–2026 ──────────────────────────
+        ("2023-10-01", "2023-12-31",  12,  "Israel-Hamas war"),       # Oct 7 attack, Brent ~$90–95
+        ("2024-01-01", "2024-03-31",   8,  "Red Sea Houthi attacks"), # shipping disruption
+        ("2024-04-01", "2024-04-30",  14,  "Iran strikes Israel"),    # Apr 13–14 Iranian drone/missile barrage
+        ("2024-05-01", "2024-07-31",  -6,  "Ceasefire hopes"),        # diplomatic pullback
+        ("2024-08-01", "2024-09-30",  -5,  "Demand fears"),           # China slowdown weighs
+        ("2024-10-01", "2024-10-31",  10,  "Israel strikes Iran"),    # Oct Israeli retaliation strikes
+        ("2024-11-01", "2024-12-31",  -8,  "US election, OPEC+"),     # Trump election, market digests
+        ("2025-01-01", "2025-03-31",   6,  "US-Iran sanctions"),      # Trump max-pressure campaign
+        ("2025-04-01", "2025-06-30",  -4,  "OPEC+ output hike"),      # OPEC surprise hike weighs
+        ("2025-07-01", "2025-09-30",   3,  "Summer demand"),          # seasonal demand
+        ("2025-10-01", "2025-12-31",  -5,  "Demand slowdown"),        # global growth concerns
+        ("2026-01-01", "2026-03-01",  -3,  "Gradual normalisation"),  # diplomatic de-escalation
+    ]
+
+    for start, end, bump, _ in events:
         mask = (dates >= start) & (dates <= end)
-        price[mask] += bump
+        # Smooth the bump in/out to avoid artificial step changes
+        idx = np.where(mask)[0]
+        if len(idx) == 0:
+            continue
+        ramp = np.linspace(0, bump, len(idx))
+        price[idx] += ramp
+
+    # Clip to realistic range
+    price = np.clip(price, 15, 145)
 
     df = pd.DataFrame({
-        "brent_crude":  np.clip(price, 5, 200),
-        "wti_crude":    np.clip(price - rng.uniform(1, 4, n), 5, 195),
-        "natural_gas":  np.abs(rng.normal(3, 1.2, n)),
-        "us_cpi_energy": 200 + np.cumsum(rng.normal(0.3, 0.8, n)),
-        "crisis_flag":  0,
-        "crisis_name":  "normal",
+        "brent_crude":   price,
+        "wti_crude":     np.clip(price - rng.uniform(1.5, 4.5, n), 12, 140),
+        "natural_gas":   np.abs(rng.normal(3.2, 1.4, n)),
+        "us_cpi_energy": 180 + np.cumsum(rng.normal(0.35, 0.9, n)),
+        "crisis_flag":   0,
+        "crisis_name":   "normal",
     }, index=dates)
 
+    # ── Crisis period labels ───────────────────────────────────────────────────
     crisis_periods = [
-        ("2003-02-01", "2003-06-30", "gulf_war_2"),
-        ("2007-06-01", "2008-12-31", "gfc_spike"),
-        ("2011-01-01", "2012-06-30", "arab_spring"),
-        ("2014-07-01", "2016-03-31", "opec_price_war"),
-        ("2020-01-01", "2020-06-30", "covid_crash"),
-        ("2022-02-01", "2022-12-31", "ukraine_war"),
+        ("2003-02-01", "2003-06-30",  "gulf_war_2"),
+        ("2007-06-01", "2008-12-31",  "gfc_spike"),
+        ("2011-01-01", "2012-06-30",  "arab_spring"),
+        ("2014-07-01", "2016-03-31",  "opec_price_war"),
+        ("2020-01-01", "2020-06-30",  "covid_crash"),
+        ("2022-02-01", "2022-12-31",  "ukraine_war"),
+        ("2023-10-01", "2024-04-30",  "israel_hamas_iran"),
+        ("2025-01-01", "2025-06-30",  "us_iran_tensions"),
     ]
     for s, e, name in crisis_periods:
         mask = (df.index >= s) & (df.index <= e)
@@ -183,12 +228,12 @@ def render_sidebar() -> dict:
         run_sim = st.button("🚀 Run Simulation", use_container_width=True, type="primary")
 
     return {
-        "country_name":   selected_country_name,
-        "iso3":           selected_iso3,
+        "country_name":    selected_country_name,
+        "iso3":            selected_iso3,
         "crisis_severity": crisis_severity,
-        "base_price":     base_price,
-        "monthly_litres": monthly_litres,
-        "run_sim":        run_sim,
+        "base_price":      base_price,
+        "monthly_litres":  monthly_litres,
+        "run_sim":         run_sim,
     }
 
 
@@ -205,10 +250,9 @@ def tab_simulator(params: dict, master_df: pd.DataFrame) -> None:
 
     if not params["run_sim"]:
         st.info("👈 Configure parameters in the sidebar and click **Run Simulation**.")
-        # Show last Brent price as a teaser
         if "brent_crude" in master_df.columns:
             latest = master_df["brent_crude"].dropna().iloc[-1]
-            st.metric("Latest Brent Crude Price", f"${latest:.2f}/bbl")
+            st.metric("Latest Brent Crude Price (Mar 2026)", f"${latest:.2f}/bbl")
         return
 
     with st.spinner("Running simulation …"):
@@ -218,7 +262,6 @@ def tab_simulator(params: dict, master_df: pd.DataFrame) -> None:
             monthly_litres=params["monthly_litres"],
         )
 
-    # ── Top KPI cards ──────────────────────────────────────────────────────────
     col1, col2, col3, col4 = st.columns(4)
     with col1:
         st.markdown(f"""
@@ -243,7 +286,6 @@ def tab_simulator(params: dict, master_df: pd.DataFrame) -> None:
           <p>Average across countries</p>
         </div>""", unsafe_allow_html=True)
     with col4:
-        # Specific country
         country_impact = next(
             (c for c in result.country_impacts if c.iso3 == params["iso3"]), None
         )
@@ -257,7 +299,6 @@ def tab_simulator(params: dict, master_df: pd.DataFrame) -> None:
 
     st.markdown("---")
 
-    # ── Country impact chart ───────────────────────────────────────────────────
     col_a, col_b = st.columns([3, 2])
     with col_a:
         impact_df = result.to_dataframe()
@@ -290,7 +331,6 @@ def tab_simulator(params: dict, master_df: pd.DataFrame) -> None:
             }
             st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
 
-    # ── Scenario sweep ─────────────────────────────────────────────────────────
     st.markdown("---")
     st.subheader("Multi-Scenario Sensitivity Analysis")
     with st.spinner("Running sweep across 5–30% disruption range …"):
@@ -305,7 +345,6 @@ def tab_simulator(params: dict, master_df: pd.DataFrame) -> None:
     with c2:
         st.plotly_chart(plotly_shock_heatmap(sweep), use_container_width=True)
 
-    # ── Raw table ──────────────────────────────────────────────────────────────
     with st.expander("📄 View Full Impact Table"):
         st.dataframe(
             impact_df.sort_values("retail_price_pct", ascending=False)
@@ -329,21 +368,19 @@ def tab_history(master_df: pd.DataFrame) -> None:
     st.header("📈 Historical Oil Price Explorer")
 
     if "brent_crude" not in master_df.columns:
-        st.warning("No historical data loaded. Run `python src/data_collection.py` first.")
+        st.warning("No historical data loaded.")
         return
 
-    # Date range filter
     min_date = master_df.index.min().date()
     max_date = master_df.index.max().date()
     col1, col2 = st.columns(2)
     with col1:
         start = st.date_input("From", value=min_date, min_value=min_date, max_value=max_date)
     with col2:
-        end   = st.date_input("To",   value=max_date, min_value=min_date, max_value=max_date)
+        end = st.date_input("To", value=max_date, min_value=min_date, max_value=max_date)
 
     df_filtered = master_df.loc[str(start):str(end)]
 
-    # ── Brent vs WTI ─────────────────────────────────────────────────────────
     fig = go.Figure()
     if "brent_crude" in df_filtered.columns:
         fig.add_trace(go.Scatter(
@@ -356,31 +393,53 @@ def tab_history(master_df: pd.DataFrame) -> None:
             name="WTI Crude", line=dict(color="#1565C0", width=1.5, dash="dash"),
         ))
 
-    # Overlay crisis bands
+    # ── Crisis bands including 2023–2026 Middle East events ───────────────────
     crisis_meta = [
-        ("2003-02-01", "2003-06-30", "Gulf War II",     "rgba(211,47,47,0.12)"),
-        ("2007-06-01", "2008-12-31", "GFC Spike",       "rgba(255,111,0,0.12)"),
-        ("2011-01-01", "2012-06-30", "Arab Spring",     "rgba(21,101,192,0.12)"),
-        ("2014-07-01", "2016-03-31", "OPEC Price War",  "rgba(46,125,50,0.12)"),
-        ("2020-01-01", "2020-06-30", "COVID Crash",     "rgba(106,27,154,0.12)"),
-        ("2022-02-01", "2022-12-31", "Ukraine War",     "rgba(191,54,12,0.12)"),
+        ("2003-02-01", "2003-06-30", "Gulf War II",           "rgba(211,47,47,0.12)"),
+        ("2007-06-01", "2008-12-31", "GFC Spike",             "rgba(255,111,0,0.12)"),
+        ("2011-01-01", "2012-06-30", "Arab Spring",           "rgba(21,101,192,0.12)"),
+        ("2014-07-01", "2016-03-31", "OPEC Price War",        "rgba(46,125,50,0.12)"),
+        ("2020-01-01", "2020-06-30", "COVID Crash",           "rgba(106,27,154,0.12)"),
+        ("2022-02-01", "2022-12-31", "Ukraine War",           "rgba(191,54,12,0.12)"),
+        ("2023-10-01", "2024-04-30", "Israel–Hamas–Iran",     "rgba(183,28,28,0.15)"),
+        ("2025-01-01", "2025-06-30", "US–Iran Tensions",      "rgba(130,0,0,0.12)"),
     ]
     for s, e, label, color in crisis_meta:
-        if pd.Timestamp(s) >= df_filtered.index.min() and pd.Timestamp(e) <= df_filtered.index.max():
-            fig.add_vrect(x0=s, x1=e, fillcolor=color, layer="below",
-                          annotation_text=label, annotation_position="top left",
-                          annotation=dict(font_size=10))
+        try:
+            if pd.Timestamp(s) <= df_filtered.index.max() and pd.Timestamp(e) >= df_filtered.index.min():
+                fig.add_vrect(
+                    x0=max(s, str(df_filtered.index.min().date())),
+                    x1=min(e, str(df_filtered.index.max().date())),
+                    fillcolor=color, layer="below",
+                    annotation_text=label, annotation_position="top left",
+                    annotation=dict(font_size=9),
+                )
+        except Exception:
+            pass
 
     fig.update_layout(
-        title="Brent & WTI Crude Oil Prices",
+        title="Brent & WTI Crude Oil Prices (2000–2026)",
         yaxis_title="USD / Barrel",
-        height=420,
+        height=480,
         legend=dict(x=0, y=1.1, orientation="h"),
         hovermode="x unified",
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    # ── Stats ─────────────────────────────────────────────────────────────────
+    # ── Key events timeline annotation ────────────────────────────────────────
+    with st.expander("📅 Key Geopolitical Events Timeline"):
+        events_df = pd.DataFrame([
+            {"Date": "Feb 2022", "Event": "Russia invades Ukraine — Brent spikes to $127/bbl"},
+            {"Date": "Oct 2023", "Event": "Hamas attacks Israel (Oct 7) — Middle East risk premium returns"},
+            {"Date": "Jan 2024", "Event": "Houthi attacks on Red Sea shipping — global freight costs surge"},
+            {"Date": "Apr 2024", "Event": "Iran launches 300+ drones & missiles at Israel — Brent jumps ~$3"},
+            {"Date": "Oct 2024", "Event": "Israel strikes Iranian military sites — short-term spike"},
+            {"Date": "Jan 2025", "Event": "US re-imposes maximum pressure sanctions on Iran"},
+            {"Date": "Apr 2025", "Event": "OPEC+ surprise output hike weighs on prices"},
+            {"Date": "2026",     "Event": "Gradual de-escalation — diplomatic channels open"},
+        ])
+        st.dataframe(events_df, hide_index=True, use_container_width=True)
+
     st.subheader("Descriptive Statistics (filtered range)")
     show_cols = [c for c in ["brent_crude", "wti_crude", "natural_gas", "us_cpi_energy"]
                  if c in df_filtered.columns]
@@ -406,7 +465,6 @@ def tab_models(master_df: pd.DataFrame) -> None:
 
                 master_df_clean = master_df.replace([np.inf, -np.inf], np.nan)
 
-                # Add split column if missing (happens with synthetic fallback data)
                 if "split" not in master_df_clean.columns:
                     master_df_clean["split"] = np.where(
                         master_df_clean.index < TRAIN_TEST_SPLIT_DATE, "train", "test"
@@ -429,10 +487,12 @@ def tab_models(master_df: pd.DataFrame) -> None:
         mc         = st.session_state.get("mc")
 
         st.subheader("Model Performance Metrics")
-        st.dataframe(metrics_df.style.highlight_min(color="#1b5e20", subset=["RMSE", "MAE"])
-                     .highlight_max(color="#1b5e20", subset=["R2"]), use_container_width=True)
+        st.dataframe(
+            metrics_df.style.highlight_min(color="#1b5e20", subset=["RMSE", "MAE"])
+                            .highlight_max(color="#1b5e20", subset=["R2"]),
+            use_container_width=True,
+        )
 
-        # ── Prediction chart ──────────────────────────────────────────────────
         st.subheader("Predictions vs Actual (Test Set)")
         fig = go.Figure()
         fig.add_trace(go.Scatter(x=preds_df.index, y=preds_df["actual"],
@@ -443,11 +503,9 @@ def tab_models(master_df: pd.DataFrame) -> None:
                 x=preds_df.index, y=preds_df[col],
                 name=col, line=dict(color=colors[i % len(colors)], width=1.5, dash="dot"),
             ))
-        fig.update_layout(height=420, hovermode="x unified",
-                          yaxis_title="Brent (USD/bbl)")
+        fig.update_layout(height=420, hovermode="x unified", yaxis_title="Brent (USD/bbl)")
         st.plotly_chart(fig, use_container_width=True)
 
-        # ── Feature importance ────────────────────────────────────────────────
         if mc and "XGBoost" in mc.models:
             xgb = mc.models["XGBoost"]
             if hasattr(xgb, "feature_importances_"):
@@ -477,10 +535,10 @@ def tab_sentiment() -> None:
             try:
                 from sentiment import fetch_headlines, score_headlines, aggregate_daily_sentiment
                 import os
-                api_key = os.getenv("GNEWS_API_KEY", "")
-                headlines  = fetch_headlines(api_key=api_key)
-                scored     = score_headlines(headlines)
-                daily      = aggregate_daily_sentiment(scored)
+                api_key   = os.getenv("GNEWS_API_KEY", "")
+                headlines = fetch_headlines(api_key=api_key)
+                scored    = score_headlines(headlines)
+                daily     = aggregate_daily_sentiment(scored)
                 st.session_state["scored_headlines"] = scored
                 st.session_state["daily_sentiment"]  = daily
             except Exception as exc:
@@ -491,13 +549,11 @@ def tab_sentiment() -> None:
         scored = st.session_state["scored_headlines"]
         daily  = st.session_state["daily_sentiment"]
 
-        # KPI
         c1, c2, c3 = st.columns(3)
         c1.metric("Headlines Analysed", len(scored))
-        c2.metric("Avg Polarity",  f"{scored['polarity'].mean():.3f}")
-        c3.metric("Dominant Label", scored["label"].mode()[0].title())
+        c2.metric("Avg Polarity",       f"{scored['polarity'].mean():.3f}")
+        c3.metric("Dominant Label",     scored["label"].mode()[0].title())
 
-        # Sentiment distribution
         label_counts = scored["label"].value_counts()
         fig_pie = go.Figure(go.Pie(
             labels=label_counts.index, values=label_counts.values,
@@ -507,7 +563,6 @@ def tab_sentiment() -> None:
         fig_pie.update_layout(title="Sentiment Distribution", height=320)
         st.plotly_chart(fig_pie, use_container_width=True)
 
-        # Daily trend
         if not daily.empty:
             fig_line = go.Figure(go.Scatter(
                 x=daily.index, y=daily["mean_polarity"],
@@ -519,13 +574,13 @@ def tab_sentiment() -> None:
                                    yaxis_title="Polarity Score")
             st.plotly_chart(fig_line, use_container_width=True)
 
-        # Headline table — fixed: use .map() instead of deprecated .applymap()
         st.subheader("Headline Details")
-        display_cols = [c for c in ["date", "source", "headline", "polarity", "label"] if c in scored.columns]
+        display_cols = [c for c in ["date", "source", "headline", "polarity", "label"]
+                        if c in scored.columns]
         st.dataframe(
             scored[display_cols]
             .sort_values("date", ascending=False)
-            .style.map(
+            .style.applymap(
                 lambda v: "color: #4CAF50" if v == "positive" else
                           ("color: #F44336" if v == "negative" else ""),
                 subset=["label"],
