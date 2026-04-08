@@ -44,32 +44,28 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Custom CSS ─────────────────────────────────────────────────────────────────
+# ── Custom CSS (works in both light and dark mode) ─────────────────────────────
 st.markdown("""
 <style>
-    /* Dark petroleum-industry aesthetic */
-    :root {
-        --primary:   #D32F2F;
-        --secondary: #1565C0;
-        --accent:    #FF6F00;
-        --bg:        #0A0A0A;
-        --surface:   #161616;
-        --text:      #E8E8E8;
-    }
-    .stApp { background-color: #0D1117; }
     .metric-card {
-        background: linear-gradient(135deg, #161B22, #21262D);
-        border: 1px solid #30363D;
+        border: 1px solid rgba(128, 128, 128, 0.25);
         border-radius: 10px;
         padding: 16px 20px;
         margin: 6px 0;
     }
-    .metric-card h2 { color: #FF6F00; font-size: 2rem; margin: 0; }
-    .metric-card p  { color: #8B949E; font-size: 0.85rem; margin: 0; }
+    .metric-card h2 {
+        color: #FF6F00;
+        font-size: 2rem;
+        margin: 0;
+    }
+    .metric-card p {
+        font-size: 0.85rem;
+        margin: 0;
+        opacity: 0.75;
+    }
     .crisis-badge {
-        background: #D32F2F22;
         border: 1px solid #D32F2F;
-        color: #EF5350;
+        color: #D32F2F;
         border-radius: 20px;
         padding: 2px 10px;
         font-size: 0.78rem;
