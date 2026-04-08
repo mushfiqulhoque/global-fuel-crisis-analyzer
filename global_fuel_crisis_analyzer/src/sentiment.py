@@ -117,17 +117,17 @@ def fetch_headlines(
 
 
 def _synthetic_headlines() -> pd.DataFrame:
-    """Return a curated set of synthetic headlines spanning crisis and calm periods."""
-    base = datetime(2024, 1, 1)
+    """Return a curated set of synthetic headlines relative to today's date."""
+    base = datetime.utcnow()  # ← FIXED: was hardcoded datetime(2024, 1, 1)
     data = [
         (0,  "Oil prices surge as OPEC+ announces surprise production cut",     "Reuters"),
-        (1,  "Brent crude tops $100 amid Middle East supply fears",              "Bloomberg"),
-        (3,  "Energy crisis deepens as sanctions tighten on Russian exports",    "FT"),
-        (5,  "Fuel costs hit record highs in Europe, Asia",                     "AP"),
-        (7,  "OPEC holds output steady; prices ease on demand concerns",         "WSJ"),
+        (2,  "Brent crude slips amid demand concerns from China slowdown",       "Bloomberg"),
+        (4,  "Energy markets volatile as US-Iran tensions escalate in 2026",    "FT"),
+        (6,  "Fuel costs ease slightly across Europe after OPEC+ output hike",  "AP"),
+        (8,  "OPEC holds output steady; prices ease on demand concerns",         "WSJ"),
         (10, "Global oil supply rebounds as non-OPEC output rises",             "Reuters"),
         (12, "Crude prices fall sharply on weaker Chinese demand data",          "Bloomberg"),
-        (14, "IEA warns of tight oil market through year-end",                  "IEA"),
+        (14, "IEA warns of tight oil market through mid-2026",                  "IEA"),
         (17, "US strategic petroleum reserve release helps stabilise prices",    "CNBC"),
         (20, "Geopolitical tensions push crude to two-month high",              "Reuters"),
         (22, "Oil demand outlook cut by analysts amid recession worries",        "Bloomberg"),
@@ -136,7 +136,7 @@ def _synthetic_headlines() -> pd.DataFrame:
         (30, "Markets calm as ceasefire talks progress; oil falls 3%",          "Reuters"),
     ]
     rows = [
-        {"date": (base + timedelta(days=d)).date(), "headline": h, "source": s}
+        {"date": (base - timedelta(days=d)).date(), "headline": h, "source": s}
         for d, h, s in data
     ]
     return pd.DataFrame(rows)
