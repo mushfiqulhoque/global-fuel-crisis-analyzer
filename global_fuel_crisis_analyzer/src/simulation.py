@@ -20,17 +20,21 @@ from config import (
 )
 
 
+# -----------------------------
+# DATA CLASSES
+# -----------------------------
+
 @dataclass
 class CountryImpact:
-    iso3:                  str
-    name:                  str
-    region:                str
+    iso3: str
+    name: str
+    region: str
     base_retail_price_usd: float
-    new_retail_price_usd:  float
-    retail_price_delta:    float
-    retail_price_pct:      float
+    new_retail_price_usd: float
+    retail_price_delta: float
+    retail_price_pct: float
     monthly_cost_increase: float
-    inflation_contribution:float
+    inflation_contribution: float
 
     def to_dict(self) -> dict:
         return self.__dict__
@@ -38,14 +42,14 @@ class CountryImpact:
 
 @dataclass
 class ShockResult:
-    scenario_name:          str
-    supply_drop_pct:        float
-    base_brent_price:       float
-    shocked_brent_price:    float
-    brent_price_delta:      float
-    brent_price_pct:        float
+    scenario_name: str
+    supply_drop_pct: float
+    base_brent_price: float
+    shocked_brent_price: float
+    brent_price_delta: float
+    brent_price_pct: float
     global_inflation_proxy: float
-    country_impacts:        list[CountryImpact] = field(default_factory=list)
+    country_impacts: list[CountryImpact] = field(default_factory=list)
 
     def to_dataframe(self) -> pd.DataFrame:
         return pd.DataFrame([c.to_dict() for c in self.country_impacts])
@@ -71,10 +75,14 @@ class ShockResult:
         return "\n".join(lines)
 
 
+# -----------------------------
+# CORE FUNCTIONS
+# -----------------------------
+
 def _compute_brent_shock(
-    base_price:  float,
+    base_price: float,
     supply_drop: float,
-    elasticity:  float = SUPPLY_ELASTICITY,
+    elasticity: float = SUPPLY_ELASTICITY,
 ) -> float:
     pct_price_change = supply_drop / elasticity
     pct_price_change = min(pct_price_change, 0.80)
@@ -83,18 +91,18 @@ def _compute_brent_shock(
 
 
 def _compute_retail_impact(
-    iso3:             str,
-    brent_delta_pct:  float,
+    iso3: str,
+    brent_delta_pct: float,
     base_brent_price: float,
-    passthrough:      float = PASSTHROUGH_RATE,
-    monthly_litres:   float = 60.0,
+    passthrough: float = PASSTHROUGH_RATE,
+    monthly_litres: float = 60.0,
 ) -> CountryImpact:
-    info       = COUNTRIES.get(iso3, {"name": iso3, "region": "Unknown"})
+    info = COUNTRIES.get(iso3, {"name": iso3, "region": "Unknown"})
     multiplier = COUNTRY_FUEL_MULTIPLIER.get(iso3, 0.025)
 
-    base_retail  = base_brent_price * multiplier
+    base_retail = base_brent_price * multiplier
     delta_retail = base_retail * brent_delta_pct * passthrough
-    new_retail   = base_retail + delta_retail
+    new_retail = base_retail + delta_retail
 
     inflation_contribution = (delta_retail / base_retail) * INFLATION_FUEL_WEIGHT * 100
 
@@ -112,14 +120,15 @@ def _compute_retail_impact(
 
 
 def simulate_supply_shock(
-    percent_drop:   float,
-    base_price:     float               = 85.0,
-    countries:      Optional[list[str]] = None,
-    scenario_name:  str                 = "",
-    elasticity:     float               = SUPPLY_ELASTICITY,
-    passthrough:    float               = PASSTHROUGH_RATE,
-    monthly_litres: float               = 60.0,
+    percent_drop: float,
+    base_price: float = 85.0,
+    countries: Optional[list[str]] = None,
+    scenario_name: str = "",
+    elasticity: float = SUPPLY_ELASTICITY,
+    passthrough: float = PASSTHROUGH_RATE,
+    monthly_litres: float = 60.0,
 ) -> ShockResult:
+
     if percent_drop <= 0:
         raise ValueError("percent_drop must be a positive number.")
     if percent_drop >= 100:
@@ -134,18 +143,48 @@ def simulate_supply_shock(
     logger.info(f"Simulating: {scenario_name}")
 
     shocked_price = _compute_brent_shock(base_price, supply_drop_fraction, elasticity)
-    brent_delta   = shocked_price - base_price
-    brent_pct     = brent_delta / base_price
+    brent_delta = shocked_price - base_price
+    brent_pct = brent_delta / base_price
 
     impacts: list[CountryImpact] = []
     for iso3 in countries:
-        impact = _compute_retail_impact(iso3, brent_pct, base_price, passthrough, monthly_litres)
+        impact = _compute_retail_impact(
+            iso3, brent_pct, base_price, passthrough, monthly_litres
+        )
         impacts.append(impact)
 
     global_inflation = float(np.mean([c.inflation_contribution for c in impacts]))
 
-    result = ShockResult(
+    return ShockResult(
         scenario_name=scenario_name,
         supply_drop_pct=percent_drop,
         base_brent_price=base_price,
-        shocked_brent_price=r
+        shocked_brent_price=shocked_price,
+        brent_price_delta=brent_delta,
+        brent_price_pct=brent_pct,
+        global_inflation_proxy=global_inflation,
+        country_impacts=impacts,
+    )
+
+
+# -----------------------------
+# ADDED FIX: run_scenario_sweep
+# -----------------------------
+
+def run_scenario_sweep(
+    scenarios: list[float],
+    base_price: float = 85.0,
+) -> pd.DataFrame:
+    """
+    Runs multiple supply shock scenarios and returns combined results.
+    """
+
+    results = []
+
+    for s in scenarios:
+        result = simulate_supply_shock(percent_drop=s, base_price=base_price)
+        df = result.to_dataframe()
+        df["scenario"] = s
+        results.append(df)
+
+    return pd.concat(results, ignore_index=True)
