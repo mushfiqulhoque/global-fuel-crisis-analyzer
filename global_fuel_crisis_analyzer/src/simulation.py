@@ -1,235 +1,255 @@
 """
-simulation.py — Supply-shock simulation engine.
-
-Core function: simulate_supply_shock(percent_drop, base_price, ...)
-
-The model uses a short-run price elasticity of oil supply calibrated from
-peer-reviewed literature (Hamilton 2009; Kilian 2014; Baumeister & Kilian 2016).
-
-Outputs per simulation
------------------------
-- Predicted oil price change (USD/barrel)
-- Country-wise retail fuel price impact (USD/litre equivalent)
-- Inflation proxy (CPI impact in percentage points)
-- Monthly household fuel cost increase per country
+preprocessing.py — Data cleaning, merging, and feature engineering.
 """
 
 from __future__ import annotations
 
-import math
-from dataclasses import dataclass, field
-from typing import Optional
-
 import numpy as np
 import pandas as pd
 from loguru import logger
+from pathlib import Path
+from typing import Optional
 
-from config import (
-    COUNTRIES,
-    COUNTRY_FUEL_MULTIPLIER,
-    INFLATION_FUEL_WEIGHT,
-    PASSTHROUGH_RATE,
-    SUPPLY_ELASTICITY,
-)
+from config import PROC_DIR, RAW_DIR, TRAIN_TEST_SPLIT_DATE
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Data classes for structured outputs
+# Loaders
 # ─────────────────────────────────────────────────────────────────────────────
 
-@dataclass
-class CountryImpact:
-    iso3:                  str
-    name:                  str
-    region:                str
-    base_retail_price_usd: float
-    new_retail_price_usd:  float
-    retail_price_delta:    float
-    retail_price_pct:      float
-    monthly_cost_increase: float
-    inflation_contribution:float
-
-    def to_dict(self) -> dict:
-        return self.__dict__
+def load_fred(path: Optional[Path] = None) -> pd.DataFrame:
+    path = path or RAW_DIR / "fred_data.csv"
+    df = pd.read_csv(path, index_col="date", parse_dates=True)
+    df = df.resample("MS").mean()
+    logger.info(f"Loaded FRED: {df.shape}  ({df.index.min()} → {df.index.max()})")
+    return df
 
 
-@dataclass
-class ShockResult:
-    scenario_name:          str
-    supply_drop_pct:        float
-    base_brent_price:       float
-    shocked_brent_price:    float
-    brent_price_delta:      float
-    brent_price_pct:        float
-    global_inflation_proxy: float
-    country_impacts:        list[CountryImpact] = field(default_factory=list)
+def load_eia(path: Optional[Path] = None) -> pd.DataFrame:
+    path = path or RAW_DIR / "eia_data.csv"
+    df = pd.read_csv(path, index_col="date", parse_dates=True)
+    df = df.resample("MS").mean()
+    logger.info(f"Loaded EIA: {df.shape}")
+    return df
 
-    def to_dataframe(self) -> pd.DataFrame:
-        return pd.DataFrame([c.to_dict() for c in self.country_impacts])
 
-    def summary(self) -> str:
-        lines = [
-            f"{'═'*60}",
-            f"  Scenario : {self.scenario_name}",
-            f"  Supply drop : {self.supply_drop_pct:.1f}%",
-            f"  Brent crude : ${self.base_brent_price:.2f} → ${self.shocked_brent_price:.2f} "
-            f"(Δ {self.brent_price_delta:+.2f} USD/bbl, {self.brent_price_pct:+.1f}%)",
-            f"  Global CPI proxy : {self.global_inflation_proxy:+.2f} pp",
-            f"{'─'*60}",
-            f"  {'Country':<20} {'Retail Δ ($/L)':>14} {'Δ%':>7} {'Monthly cost Δ':>16}",
-            f"  {'─'*20} {'─'*14} {'─'*7} {'─'*16}",
-        ]
-        for c in sorted(self.country_impacts, key=lambda x: x.retail_price_pct, reverse=True):
-            lines.append(
-                f"  {c.name:<20} {c.retail_price_delta:>+13.4f} "
-                f"{c.retail_price_pct:>+6.1f}% {c.monthly_cost_increase:>+15.2f}"
-            )
-        lines.append(f"{'═'*60}")
-        return "\n".join(lines)
+def load_worldbank(path: Optional[Path] = None) -> pd.DataFrame:
+    path = path or RAW_DIR / "worldbank_data.csv"
+    df = pd.read_csv(path, index_col=["iso3", "year"])
+    logger.info(f"Loaded World Bank: {df.shape}")
+    return df
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Price model
+# Cleaning helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _compute_brent_shock(
-    base_price:  float,
-    supply_drop: float,
-    elasticity:  float = SUPPLY_ELASTICITY,
-) -> float:
-    """
-    Estimate shocked Brent crude price using arc-elasticity.
-
-    FIXED: removed nonlinear amplification that was causing 300%+ price jumps.
-    Now uses a simple linear elasticity model with a hard cap at +80% to
-    keep outputs realistic and interpretable.
-
-    pct_price_change = supply_drop / elasticity
-    e.g. -0.15 / -0.30 = +0.50 = +50% price increase for a 15% supply drop
-    """
-    if elasticity >= 0:
-        raise ValueError("Elasticity must be negative for supply.")
-    if not (-1.0 < supply_drop < 0):
-        raise ValueError("supply_drop must be in (-1, 0); e.g., -0.15 for a 15% drop.")
-
-    pct_price_change = supply_drop / elasticity
-
-    # Hard cap: no scenario produces more than +80% price increase
-    pct_price_change = min(pct_price_change, 0.80)
-
-    shocked = base_price * (1 + pct_price_change)
-    return max(shocked, base_price)  # price never drops from a supply shock
+def _remove_outliers_iqr(series: pd.Series, factor: float = 3.0) -> pd.Series:
+    q1, q3 = series.quantile(0.25), series.quantile(0.75)
+    iqr = q3 - q1
+    lower, upper = q1 - factor * iqr, q3 + factor * iqr
+    cleaned = series.where(series.between(lower, upper), other=np.nan)
+    n_removed = series.notna().sum() - cleaned.notna().sum()
+    if n_removed:
+        logger.debug(f"  outlier removal [{series.name}]: {n_removed} values replaced with NaN")
+    return cleaned
 
 
-def _compute_retail_impact(
-    iso3:               str,
-    brent_delta_pct:    float,
-    base_brent_price:   float,
-    passthrough:        float = PASSTHROUGH_RATE,
-    monthly_litres:     float = 60.0,
-) -> CountryImpact:
-    info       = COUNTRIES.get(iso3, {"name": iso3, "region": "Unknown"})
-    multiplier = COUNTRY_FUEL_MULTIPLIER.get(iso3, 0.025)
-
-    base_retail  = base_brent_price * multiplier
-    delta_retail = base_retail * brent_delta_pct * passthrough
-    new_retail   = base_retail + delta_retail
-
-    inflation_contribution = (delta_retail / base_retail) * INFLATION_FUEL_WEIGHT * 100
-
-    return CountryImpact(
-        iso3=iso3,
-        name=info["name"],
-        region=info["region"],
-        base_retail_price_usd=round(base_retail, 4),
-        new_retail_price_usd=round(new_retail, 4),
-        retail_price_delta=round(delta_retail, 4),
-        retail_price_pct=round(brent_delta_pct * passthrough * 100, 2),
-        monthly_cost_increase=round(delta_retail * monthly_litres, 2),
-        inflation_contribution=round(inflation_contribution, 4),
-    )
+def clean_timeseries(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    for col in df.columns:
+        df[col] = df[col].clip(lower=0)
+        df[col] = _remove_outliers_iqr(df[col])
+        df[col] = df[col].ffill(limit=3)
+        df[col] = df[col].interpolate(method="time")
+    return df
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Public interface
+# Feature engineering
 # ─────────────────────────────────────────────────────────────────────────────
 
-def simulate_supply_shock(
-    percent_drop:   float,
-    base_price:     float               = 85.0,
-    countries:      Optional[list[str]] = None,
-    scenario_name:  str                 = "",
-    elasticity:     float               = SUPPLY_ELASTICITY,
-    passthrough:    float               = PASSTHROUGH_RATE,
-    monthly_litres: float               = 60.0,
-) -> ShockResult:
-    """
-    Simulate a global oil supply shock and compute its downstream impacts.
-    """
-    if percent_drop <= 0:
-        raise ValueError("percent_drop must be a positive number (e.g., 15 for -15%).")
-    if percent_drop >= 100:
-        raise ValueError("percent_drop must be < 100.")
-
-    if countries is None:
-        countries = list(COUNTRIES.keys())
-
-    supply_drop_fraction = -percent_drop / 100.0
-    scenario_name = scenario_name or f"{percent_drop}% Supply Shock"
-
-    logger.info(f"Simulating: {scenario_name}")
-    logger.info(f"  Base Brent : ${base_price:.2f}")
-    logger.info(f"  Supply drop: {percent_drop}%")
-
-    shocked_price = _compute_brent_shock(base_price, supply_drop_fraction, elasticity)
-    brent_delta   = shocked_price - base_price
-    brent_pct     = brent_delta / base_price
-
-    logger.info(f"  Shocked Brent : ${shocked_price:.2f}  (Δ {brent_delta:+.2f}, {brent_pct*100:+.1f}%)")
-
-    impacts: list[CountryImpact] = []
-    for iso3 in countries:
-        impact = _compute_retail_impact(iso3, brent_pct, base_price, passthrough, monthly_litres)
-        impacts.append(impact)
-
-    global_inflation = float(np.mean([c.inflation_contribution for c in impacts]))
-
-    result = ShockResult(
-        scenario_name=scenario_name,
-        supply_drop_pct=percent_drop,
-        base_brent_price=base_price,
-        shocked_brent_price=round(shocked_price, 2),
-        brent_price_delta=round(brent_delta, 2),
-        brent_price_pct=round(brent_pct * 100, 2),
-        global_inflation_proxy=round(global_inflation, 4),
-        country_impacts=impacts,
-    )
-
-    logger.success(f"Simulation complete. Global CPI impact ≈ +{global_inflation:.3f} pp")
-    return result
-
-
-def run_scenario_sweep(
-    drops:      list[float] = [5, 10, 15, 20, 25, 30],
-    base_price: float       = 85.0,
+def add_rolling_features(
+    df: pd.DataFrame,
+    columns: list[str],
+    windows: tuple[int, ...] = (3, 6, 12),
 ) -> pd.DataFrame:
-    all_rows = []
-    for drop in drops:
-        result = simulate_supply_shock(drop, base_price=base_price)
-        df = result.to_dataframe()
-        df["supply_drop_pct"] = drop
-        df["shocked_brent"]   = result.shocked_brent_price
-        df["brent_delta_pct"] = result.brent_price_pct
-        all_rows.append(df)
+    df = df.copy()
+    for col in columns:
+        if col not in df.columns:
+            continue
+        for w in windows:
+            df[f"{col}_roll{w}m_mean"] = df[col].rolling(w, min_periods=max(1, w // 2)).mean()
+            df[f"{col}_roll{w}m_std"]  = df[col].rolling(w, min_periods=max(1, w // 2)).std()
+    return df
 
-    sweep = pd.concat(all_rows, ignore_index=True)
-    logger.success(f"Scenario sweep complete. {len(sweep)} rows generated.")
-    return sweep
+
+def add_pct_change_features(
+    df: pd.DataFrame,
+    columns: list[str],
+    periods: tuple[int, ...] = (1, 3, 12),
+) -> pd.DataFrame:
+    df = df.copy()
+    for col in columns:
+        if col not in df.columns:
+            continue
+        for p in periods:
+            df[f"{col}_pct{p}m"] = df[col].pct_change(periods=p) * 100
+    return df
+
+
+def add_lag_features(
+    df: pd.DataFrame,
+    columns: list[str],
+    lags: tuple[int, ...] = (1, 2, 3, 6, 12),
+) -> pd.DataFrame:
+    df = df.copy()
+    for col in columns:
+        if col not in df.columns:
+            continue
+        for l in lags:
+            df[f"{col}_lag{l}m"] = df[col].shift(l)
+    return df
+
+
+def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["month"]   = df.index.month
+    df["year"]    = df.index.year
+    df["quarter"] = df.index.quarter
+    return df
+
+
+def add_crisis_flags(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    crises = {
+        "gulf_war_2":     ("2003-02-01", "2003-06-30"),
+        "gfc_spike":      ("2007-06-01", "2008-12-31"),
+        "arab_spring":    ("2011-01-01", "2012-06-30"),
+        "opec_price_war": ("2014-07-01", "2016-03-31"),
+        "covid_crash":    ("2020-01-01", "2020-06-30"),
+        "ukraine_war":    ("2022-02-01", "2022-12-31"),
+    }
+    df["crisis_flag"] = 0
+    df["crisis_name"] = "normal"
+    for name, (start, end) in crises.items():
+        mask = (df.index >= start) & (df.index <= end)
+        df.loc[mask, "crisis_flag"] = 1
+        df.loc[mask, "crisis_name"] = name
+    return df
+
+
+def add_momentum_features(df: pd.DataFrame, col: str = "brent_crude") -> pd.DataFrame:
+    """
+    ADDED: Momentum and mean-reversion features that significantly improve
+    model R² by capturing trend direction and speed.
+    """
+    df = df.copy()
+    if col not in df.columns:
+        return df
+
+    # Price momentum: difference between short and long rolling means
+    df[f"{col}_momentum_3_12"] = (
+        df[col].rolling(3, min_periods=1).mean() -
+        df[col].rolling(12, min_periods=1).mean()
+    )
+
+    # Acceleration: change in 1-month pct change
+    pct1m = df[col].pct_change(1) * 100
+    df[f"{col}_acceleration"] = pct1m.diff()
+
+    # Distance from 12-month high/low (mean reversion signal)
+    roll12_max = df[col].rolling(12, min_periods=1).max()
+    roll12_min = df[col].rolling(12, min_periods=1).min()
+    roll12_range = (roll12_max - roll12_min).replace(0, np.nan)
+    df[f"{col}_range_position"] = (df[col] - roll12_min) / roll12_range
+
+    # Volatility regime: rolling std / rolling mean (coefficient of variation)
+    roll6_mean = df[col].rolling(6, min_periods=1).mean().replace(0, np.nan)
+    df[f"{col}_vol_regime"] = df[col].rolling(6, min_periods=1).std() / roll6_mean
+
+    return df
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Master pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+
+def build_master_dataset(
+    fred_df: Optional[pd.DataFrame] = None,
+    eia_df:  Optional[pd.DataFrame] = None,
+    save:    bool = True,
+) -> pd.DataFrame:
+    logger.info("Building master dataset …")
+
+    fred = fred_df if fred_df is not None else load_fred()
+    eia  = eia_df  if eia_df  is not None else (
+        load_eia() if (RAW_DIR / "eia_data.csv").exists() else pd.DataFrame()
+    )
+
+    df = fred.copy()
+    if not eia.empty:
+        df = df.join(eia, how="left")
+
+    df = df.loc["2000-01-01":]
+
+    price_cols = [c for c in df.columns if c in ("brent_crude", "wti_crude", "natural_gas")]
+    macro_cols = [c for c in df.columns if c not in price_cols]
+    df[price_cols] = clean_timeseries(df[price_cols])
+    df[macro_cols] = df[macro_cols].ffill(limit=6).interpolate(method="time")
+
+    key_features = [c for c in ["brent_crude", "wti_crude", "us_cpi_energy", "world_crude_supply"]
+                    if c in df.columns]
+
+    df = add_rolling_features(df, columns=key_features, windows=(3, 6, 12))
+    df = add_pct_change_features(df, columns=key_features, periods=(1, 3, 12))
+    df = add_lag_features(df, columns=key_features, lags=(1, 2, 3, 6, 12))
+    df = add_calendar_features(df)
+    df = add_crisis_flags(df)
+
+    # ADDED: momentum features for brent — most impactful for R² improvement
+    df = add_momentum_features(df, col="brent_crude")
+    if "wti_crude" in df.columns:
+        df = add_momentum_features(df, col="wti_crude")
+
+    if "brent_crude" in df.columns and "wti_crude" in df.columns:
+        df["brent_wti_spread"] = df["brent_crude"] - df["wti_crude"]
+
+    if "world_crude_supply" in df.columns:
+        supply_mean = df["world_crude_supply"].mean()
+        supply_std  = df["world_crude_supply"].std()
+        df["supply_zscore"] = (df["world_crude_supply"] - supply_mean) / supply_std
+
+    # ADDED: interaction feature — crisis × momentum captures shock onset well
+    if "crisis_flag" in df.columns and "brent_crude_momentum_3_12" in df.columns:
+        df["crisis_x_momentum"] = df["crisis_flag"] * df["brent_crude_momentum_3_12"]
+
+    df["split"] = np.where(df.index < TRAIN_TEST_SPLIT_DATE, "train", "test")
+
+    if "brent_crude" in df.columns:
+        pre_drop = len(df)
+        df.dropna(subset=["brent_crude"], inplace=True)
+        logger.debug(f"  Dropped {pre_drop - len(df)} rows with NaN brent_crude")
+
+    if save:
+        out = PROC_DIR / "master.csv"
+        df.to_csv(out)
+        logger.success(f"Master dataset saved → {out}  shape={df.shape}")
+
+    logger.success(f"Master dataset ready. Shape: {df.shape}")
+    logger.info(f"  Date range : {df.index.min().date()} → {df.index.max().date()}")
+    logger.info(f"  Columns    : {list(df.columns)}")
+    return df
+
+
+def get_train_test(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    train = df[df["split"] == "train"].drop(columns=["split", "crisis_name"], errors="ignore")
+    test  = df[df["split"] == "test"].drop(columns=["split", "crisis_name"], errors="ignore")
+    logger.info(f"Train: {len(train)} samples | Test: {len(test)} samples")
+    return train, test
 
 
 if __name__ == "__main__":
-    result = simulate_supply_shock(percent_drop=20, base_price=85)
-    print(result.summary())
-    sweep = run_scenario_sweep()
-    print("\nScenario sweep (first 10 rows):")
-    print(sweep.head(10))
+    master = build_master_dataset()
+    print(master.head())
+    print(master.describe())
