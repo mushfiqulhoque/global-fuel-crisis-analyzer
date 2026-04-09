@@ -1,21 +1,5 @@
 """
 modeling.py — Multi-model forecasting pipeline for Brent crude oil prices.
-
-Models implemented
-------------------
-1. BaselineLinear     — OLS regression on lagged price + macro features
-2. ARIMAForecaster    — ARIMA(p,d,q) × (P,D,Q,12) via pmdarima auto_arima
-3. RandomForestModel  — Ensemble regressor with feature importance
-4. XGBoostModel       — Gradient boosting regressor
-
-All models share a common interface:
-    .fit(X_train, y_train)
-    .predict(X_test)           → np.ndarray
-    .evaluate(y_true, y_pred)  → dict of metrics
-    .save / .load              → joblib serialisation
-
-A ModelComparison class orchestrates training + evaluation and produces
-a summary DataFrame with RMSE, MAE, and R² for each model.
 """
 
 from __future__ import annotations
@@ -51,12 +35,12 @@ from config import (
 MODEL_DIR = PROC_DIR / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Metrics helper
 # ─────────────────────────────────────────────────────────────────────────────
 
 def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    """Compute RMSE, MAE, and R² given true and predicted arrays."""
     rmse = np.sqrt(mean_squared_error(y_true, y_pred))
     mae  = mean_absolute_error(y_true, y_pred)
     r2   = r2_score(y_true, y_pred)
@@ -65,24 +49,43 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Feature selection helpers
+# Feature list — EXPANDED with momentum & interaction features
 # ─────────────────────────────────────────────────────────────────────────────
 
 REGRESSION_FEATURES = [
+    # Core lags — most predictive for time series
     "brent_crude_lag1m", "brent_crude_lag2m", "brent_crude_lag3m",
     "brent_crude_lag6m", "brent_crude_lag12m",
+    # Rolling means
     "brent_crude_roll3m_mean", "brent_crude_roll6m_mean", "brent_crude_roll12m_mean",
+    # Rolling volatility
+    "brent_crude_roll3m_std", "brent_crude_roll6m_std",
+    # Pct changes
     "brent_crude_pct1m", "brent_crude_pct3m",
-    "wti_crude_lag1m", "natural_gas_lag1m",
-    "us_cpi_energy", "brent_wti_spread",
+    # Correlated commodities
+    "wti_crude_lag1m", "wti_crude_lag2m",
+    "natural_gas_lag1m",
+    # Macro
+    "us_cpi_energy",
+    "brent_wti_spread",
+    # Supply
     "supply_zscore",
+    # Calendar
     "month", "year", "quarter",
+    # Crisis
     "crisis_flag",
+    # ADDED: momentum features from preprocessing
+    "brent_crude_momentum_3_12",
+    "brent_crude_acceleration",
+    "brent_crude_range_position",
+    "brent_crude_vol_regime",
+    "wti_crude_momentum_3_12",
+    # ADDED: crisis interaction
+    "crisis_x_momentum",
 ]
 
 
 def _safe_features(df: pd.DataFrame, wanted: list[str]) -> list[str]:
-    """Return only features that are actually present in df."""
     available = [f for f in wanted if f in df.columns]
     missing   = set(wanted) - set(available)
     if missing:
@@ -95,12 +98,6 @@ def _safe_features(df: pd.DataFrame, wanted: list[str]) -> list[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class BaselineLinear:
-    """
-    Ridge regression on hand-crafted lag + macro features.
-
-    Serves as the baseline that all other models must beat.
-    """
-
     def __init__(self, alpha: float = 1.0):
         self.alpha   = alpha
         self.model   = Pipeline([("scaler", StandardScaler()), ("ridge", Ridge(alpha=alpha))])
@@ -117,7 +114,7 @@ class BaselineLinear:
         return self
 
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
-        X = df_test[self.features].ffill().fillna(0)  # FIXED: was fillna(method="ffill")
+        X = df_test[self.features].ffill().fillna(0)
         return self.model.predict(X)
 
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
@@ -133,8 +130,7 @@ class BaselineLinear:
 
     @classmethod
     def load(cls, path: Optional[Path] = None) -> "BaselineLinear":
-        path = path or MODEL_DIR / "baseline_linear.pkl"
-        return joblib.load(path)
+        return joblib.load(path or MODEL_DIR / "baseline_linear.pkl")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -142,13 +138,6 @@ class BaselineLinear:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ARIMAForecaster:
-    """
-    Auto-ARIMA model with optional seasonal component.
-
-    Uses pmdarima.auto_arima to search ARIMA order if auto=True,
-    otherwise uses the orders from config.py.
-    """
-
     def __init__(self, auto: bool = False):
         self.auto      = auto
         self.model     = None
@@ -159,7 +148,7 @@ class ARIMAForecaster:
         series = df_train[target].dropna()
 
         if self.auto:
-            logger.info("ARIMA: running auto_arima (this may take a minute) …")
+            logger.info("ARIMA: running auto_arima …")
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 self.model = auto_arima(
@@ -167,10 +156,8 @@ class ARIMAForecaster:
                     start_p=1, start_q=1, max_p=4, max_q=4,
                     d=1, seasonal=True, m=12,
                     start_P=0, start_Q=0, max_P=2, max_Q=2,
-                    D=1,
-                    stepwise=True,
-                    suppress_warnings=True,
-                    error_action="ignore",
+                    D=1, stepwise=True,
+                    suppress_warnings=True, error_action="ignore",
                 )
             self.fit_order = (self.model.order, self.model.seasonal_order)
         else:
@@ -193,17 +180,12 @@ class ARIMAForecaster:
         return self
 
     def predict(self, steps: int) -> np.ndarray:
-        """Forecast `steps` periods ahead from end of training data."""
         if self.auto:
             return self.model.predict(n_periods=steps)
         else:
             return self.model.forecast(steps=steps).values
 
     def predict_in_sample(self, df_test: pd.DataFrame, target: str = "brent_crude") -> np.ndarray:
-        """
-        Re-fit on combined train+test to produce in-sample test predictions.
-        This simulates a walk-forward evaluation.
-        """
         n = len(df_test)
         return self.predict(n)
 
@@ -229,10 +211,6 @@ class ARIMAForecaster:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RandomForestModel:
-    """
-    Random Forest regressor with feature importance reporting.
-    """
-
     def __init__(self, params: dict = RF_PARAMS):
         self.params   = params
         self.model    = RandomForestRegressor(**params)
@@ -253,7 +231,7 @@ class RandomForestModel:
         return self
 
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
-        X = df_test[self.features].ffill().fillna(0)  # FIXED: was fillna(method="ffill")
+        X = df_test[self.features].ffill().fillna(0)
         return self.model.predict(X)
 
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
@@ -277,10 +255,6 @@ class RandomForestModel:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class XGBoostModel:
-    """
-    XGBoost regressor — typically the strongest performer on tabular data.
-    """
-
     def __init__(self, params: dict = XGB_PARAMS):
         self.params   = params
         self.model    = XGBRegressor(verbosity=0, **params)
@@ -292,7 +266,19 @@ class XGBoostModel:
         self.features = _safe_features(df_train, REGRESSION_FEATURES)
         X = df_train[self.features].dropna()
         y = df_train.loc[X.index, target]
-        self.model.fit(X, y, verbose=False)
+
+        # FIXED: use train/validation split for early stopping to prevent
+        # overfitting that causes flat or extrapolating test predictions
+        val_size = max(12, int(len(X) * 0.15))
+        X_tr, X_val = X.iloc[:-val_size], X.iloc[-val_size:]
+        y_tr, y_val = y.iloc[:-val_size], y.iloc[-val_size:]
+
+        self.model.fit(
+            X_tr, y_tr,
+            eval_set=[(X_val, y_val)],
+            verbose=False,
+        )
+
         self.feature_importances_ = pd.Series(
             self.model.feature_importances_, index=self.features
         ).sort_values(ascending=False)
@@ -325,21 +311,10 @@ class XGBoostModel:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ModelComparison:
-    """
-    Train all models, evaluate on the held-out test set, and produce a
-    comparison table + prediction DataFrame.
-
-    Usage
-    -----
-    >>> mc = ModelComparison()
-    >>> results, preds = mc.run(train_df, test_df)
-    >>> print(results)
-    """
-
     def __init__(self, target: str = "brent_crude"):
         self.target  = target
-        self.models: dict[str, object]  = {}
-        self.metrics: dict[str, dict]   = {}
+        self.models: dict[str, object]          = {}
+        self.metrics: dict[str, dict]           = {}
         self.predictions: dict[str, np.ndarray] = {}
 
     def run(
@@ -348,14 +323,8 @@ class ModelComparison:
         test:  pd.DataFrame,
         fit_arima: bool = True,
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        """
-        Train all models and return:
-        - metrics_df : DataFrame with RMSE / MAE / R² per model
-        - preds_df   : DataFrame indexed like `test` with actual + predicted columns
-        """
         y_true = test[self.target].values
 
-        # ── 1. Baseline ────────────────────────────────────────────────────────
         logger.info("Training Baseline Linear …")
         bl = BaselineLinear().fit(train, self.target)
         self.models["Baseline (Ridge)"] = bl
@@ -364,7 +333,6 @@ class ModelComparison:
         self.predictions["Baseline (Ridge)"] = preds_bl
         self.metrics["Baseline (Ridge)"] = evaluate_predictions(y_true, preds_bl)
 
-        # ── 2. ARIMA ──────────────────────────────────────────────────────────
         if fit_arima:
             logger.info("Training ARIMA …")
             try:
@@ -378,7 +346,6 @@ class ModelComparison:
             except Exception as exc:
                 logger.warning(f"ARIMA training failed: {exc}")
 
-        # ── 3. Random Forest ───────────────────────────────────────────────────
         logger.info("Training Random Forest …")
         rf = RandomForestModel().fit(train, self.target)
         self.models["Random Forest"] = rf
@@ -387,7 +354,6 @@ class ModelComparison:
         self.predictions["Random Forest"] = preds_rf
         self.metrics["Random Forest"] = evaluate_predictions(y_true, preds_rf)
 
-        # ── 4. XGBoost ────────────────────────────────────────────────────────
         logger.info("Training XGBoost …")
         xgb = XGBoostModel().fit(train, self.target)
         self.models["XGBoost"] = xgb
@@ -396,7 +362,6 @@ class ModelComparison:
         self.predictions["XGBoost"] = preds_xg
         self.metrics["XGBoost"] = evaluate_predictions(y_true, preds_xg)
 
-        # ── Build outputs ─────────────────────────────────────────────────────
         metrics_df = pd.DataFrame(self.metrics).T.sort_values("RMSE")
         logger.info("\n" + metrics_df.to_string())
 
@@ -407,7 +372,6 @@ class ModelComparison:
         return metrics_df, preds_df
 
     def best_model(self) -> tuple[str, object]:
-        """Return the (name, model) pair with the lowest RMSE."""
         if not self.metrics:
             raise RuntimeError("No models trained yet. Call .run() first.")
         best_name = min(self.metrics, key=lambda k: self.metrics[k]["RMSE"])
