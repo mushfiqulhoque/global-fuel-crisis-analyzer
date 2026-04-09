@@ -168,23 +168,34 @@ def simulate_supply_shock(
 
 
 # -----------------------------
-# ADDED FIX: run_scenario_sweep
+# FIX: run_scenario_sweep
+# — parameter renamed from "scenarios" to "drops"
+#   to match the call in app.py:
+#   run_scenario_sweep(drops=[5,10,15,20,25,30], base_price=...)
 # -----------------------------
 
 def run_scenario_sweep(
-    scenarios: list[float],
+    drops: list[float],
     base_price: float = 85.0,
 ) -> pd.DataFrame:
     """
-    Runs multiple supply shock scenarios and returns combined results.
-    """
+    Run multiple supply shock scenarios and return combined results.
 
+    Parameters
+    ----------
+    drops      : list of supply-drop percentages to simulate (e.g. [5, 10, 15, 20, 25, 30])
+    base_price : baseline Brent crude price in USD/bbl
+
+    Returns
+    -------
+    pd.DataFrame with one row per country per scenario, plus a 'scenario' column.
+    """
     results = []
 
-    for s in scenarios:
-        result = simulate_supply_shock(percent_drop=s, base_price=base_price)
+    for drop in drops:
+        result = simulate_supply_shock(percent_drop=drop, base_price=base_price)
         df = result.to_dataframe()
-        df["scenario"] = s
+        df["scenario"] = drop
         results.append(df)
 
     return pd.concat(results, ignore_index=True)
