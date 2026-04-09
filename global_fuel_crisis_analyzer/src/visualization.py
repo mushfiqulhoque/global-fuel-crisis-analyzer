@@ -291,13 +291,21 @@ def plotly_shock_heatmap(sweep_df: pd.DataFrame) -> go.Figure:
     Parameters
     ----------
     sweep_df : output of simulation.run_scenario_sweep()
+              expects columns: 'name', 'scenario', 'retail_price_pct'
     """
+    if sweep_df is None or sweep_df.empty:
+        fig = go.Figure()
+        fig.update_layout(title="No heatmap data available")
+        return fig
+
+    # FIX: column is "scenario" (set in run_scenario_sweep), not "supply_drop_pct"
     pivot = sweep_df.pivot_table(
         index="name",
-        columns="supply_drop_pct",
+        columns="scenario",
         values="retail_price_pct",
         aggfunc="first",
     )
+
     fig = px.imshow(
         pivot,
         labels=dict(x="Supply Drop (%)", y="Country", color="Retail Price Δ (%)"),
@@ -316,23 +324,34 @@ def plotly_shock_heatmap(sweep_df: pd.DataFrame) -> go.Figure:
 def plotly_scenario_sweep(sweep_df: pd.DataFrame, top_countries: int = 8) -> go.Figure:
     """
     Line chart: for each country, plot retail price change across shock severities.
+
+    Parameters
+    ----------
+    sweep_df      : output of simulation.run_scenario_sweep()
+                    expects columns: 'name', 'scenario', 'retail_price_pct'
+    top_countries : how many countries to show (those with widest impact range)
     """
-    # Select countries with widest impact range for clarity
+    if sweep_df is None or sweep_df.empty:
+        fig = go.Figure()
+        fig.update_layout(title="No scenario data available")
+        return fig
+
+    # FIX: column is "scenario" (set in run_scenario_sweep), not "supply_drop_pct"
     range_by_country = (
         sweep_df.groupby("name")["retail_price_pct"].max()
         - sweep_df.groupby("name")["retail_price_pct"].min()
     ).nlargest(top_countries).index.tolist()
 
-    df_top = sweep_df[sweep_df["name"].isin(range_by_country)]
+    df_top = sweep_df[sweep_df["name"].isin(range_by_country)].copy()
 
     fig = px.line(
         df_top,
-        x="supply_drop_pct",
+        x="scenario",           # FIX: was "supply_drop_pct"
         y="retail_price_pct",
         color="name",
         markers=True,
         labels={
-            "supply_drop_pct":  "Supply Drop (%)",
+            "scenario":         "Supply Drop (%)",
             "retail_price_pct": "Retail Price Δ (%)",
             "name":             "Country",
         },
