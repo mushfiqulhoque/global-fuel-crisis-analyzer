@@ -216,13 +216,12 @@ Visit `http://localhost:8501` in your browser.
 
 ## 👤 Author
 
-**[Md Mushfiqul Hoque]** — Data Scientist  
-Built as a portfolio project demonstrating end-to-end data science engineering for MS programme applications and industry roles.
-
+**[Md Mushfiqul Hoque]** 
+Built as a portfolio project demonstrating end-to-end data science engineering.
 ---
 
 ## 📝 License
 
-## 📋 License
+
 
 This project is free and open source — created by **Md Mushfiqul Hoque**.
