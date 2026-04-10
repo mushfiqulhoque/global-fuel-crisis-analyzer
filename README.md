@@ -26,40 +26,28 @@ This project builds a production-quality analytical system that:
 
 ## 🖥️ Dashboard Preview
 
+> 🔗 Try the live app: [global-fuel-crisis-analyzer.streamlit.app](https://global-fuel-crisis-analyzer.streamlit.app)
+
 ### Supply Shock Simulator
 Simulate a global crude oil supply disruption and see real-time impact across 15 countries — including predicted Brent price, retail fuel delta, and monthly household cost increase.
-
-![Supply Shock Simulator](screenshots/supply_shock_simulator.png)
 
 ### Multi-Scenario Sensitivity Analysis
 Compare fuel price impact across multiple supply drop scenarios (5%–30%) with line charts and a country × severity heatmap.
 
-![Sensitivity Analysis](screenshots/sensitivity_analysis.png)
-
 ### Full Impact Table
 Detailed breakdown per country — base retail price, new retail price, delta, and CPI contribution.
-
-![Impact Table](screenshots/impact_table.png)
 
 ### Historical Oil Price Explorer (2000–2026)
 Interactive Brent & WTI price chart with all major crisis periods annotated — Gulf War II, GFC, Arab Spring, OPEC Price War, COVID Crash, Ukraine War, Israel–Hamas–Iran conflict, and US–Iran tensions.
 
-![Historical Explorer](screenshots/historical_explorer.png)
-
 ### Model Performance Metrics
 XGBoost achieves R² = 0.907 on the 2022–2026 test set. All three models are compared on RMSE, MAE, R², and MAPE.
-
-![Model Metrics](screenshots/model_metrics.png)
 
 ### Predictions vs Actual
 All three models tracked against real Brent crude prices on the held-out test set.
 
-![Predictions](screenshots/predictions.png)
-
 ### XGBoost Feature Importances
 Top features are `wti_crude_lag1m`, `brent_crude_roll3m_mean`, and `brent_crude_pct3m` — confirming the model is correctly learning from lagged price signals.
-
-![Feature Importance](screenshots/feature_importance.png)
 
 ---
 
@@ -111,7 +99,7 @@ All API responses are cached to SQLite for 24 hours to avoid rate limits during 
 - Forward-fill (≤3 periods) + time-based interpolation for short gaps
 - Lag features: 1m, 2m, 3m, 6m, 12m
 - Rolling mean and std: 3m, 6m, 12m windows
-- Percentage change features: 1m, 3m, 12m
+- Percentage change features: 1m, 3m
 - Crisis period labelling for 8 historical events (2000–2026)
 
 ### Models
@@ -129,17 +117,17 @@ All API responses are cached to SQLite for 24 hours to avoid rate limits during 
 
 ### Supply Shock Simulation
 
-The core engine uses the **short-run price elasticity of supply** (ε ≈ −0.08) calibrated from Hamilton (2009) and Kilian (2014):
+The core engine uses the **short-run price elasticity of supply** (ε ≈ −0.30) with a nonlinear tanh saturation for large shocks:
 
 ```
-pct_price_change = supply_drop_fraction / elasticity
+saturated_pct_change = 0.85 × tanh(supply_drop / (|elasticity| × 0.85))
 ```
 
-For shocks exceeding 10%, a nonlinear amplifier captures the empirically observed panic premium. Country-level retail impacts:
+Country-level retail impacts:
 
 ```
-retail_delta        = base_retail × brent_delta_pct × passthrough_rate
-inflation_proxy     = (retail_delta / base_retail) × fuel_cpi_weight
+retail_delta    = base_retail × brent_delta_pct × passthrough_rate × country_factors
+inflation_proxy = (retail_delta / base_retail) × fuel_cpi_weight
 ```
 
 Country multipliers encode crude-to-pump markups, taxation, and subsidy structures calibrated from IEA and GlobalPetrolPrices.com (2022 baseline).
@@ -148,17 +136,15 @@ Country multipliers encode crude-to-pump markups, taxation, and subsidy structur
 
 ## 📊 Key Results
 
-| Scenario | Brent Δ | Brent Price | Most Impacted | Global CPI |
-|----------|---------|-------------|----------------|------------|
-| 5% supply drop  | +62.5%  | $138/bbl | Germany (+46.9%) | +0.026 pp |
-| 10% supply drop | +125%   | $191/bbl | Germany (+93.8%) | +0.051 pp |
-| 15% supply drop | +192%   | $248/bbl | Germany (+41.2%) | +0.156 pp |
-| 20% supply drop | +263%   | $309/bbl | Germany (+197%)  | +1.266 pp |
-| 30% supply drop | +414%   | $437/bbl | Germany (+311%)  | +0.333 pp |
+| Scenario | Brent Δ | Most Impacted | Least Impacted | Global CPI |
+|----------|---------|----------------|----------------|------------|
+| 5% supply drop  | +16.7% | Turkey / Germany | Saudi Arabia / Russia | +0.026 pp |
+| 10% supply drop | +30.3% | Turkey / Germany | Saudi Arabia / Russia | +0.051 pp |
+| 15% supply drop | +41.2% | Turkey / Germany | Saudi Arabia / Russia | +0.067 pp |
+| 20% supply drop | +49.5% | Turkey / Germany | Saudi Arabia / Russia | +0.081 pp |
+| 30% supply drop | +61.2% | Turkey / Germany | Saudi Arabia / Russia | +0.100 pp |
 
-*Nonlinear amplification applied for shocks > 10%.*
-
-**Germany, Turkey, and the UK are consistently the most vulnerable** due to high import dependency and fuel tax structures. Saudi Arabia and Russia are least affected due to domestic production.
+**Germany, Turkey, and the UK are consistently the most vulnerable** due to high import dependency and fuel tax structures. Saudi Arabia and Russia are least affected due to domestic production. The nonlinear (tanh) shock model captures diminishing marginal price increases at higher disruption levels.
 
 ---
 
