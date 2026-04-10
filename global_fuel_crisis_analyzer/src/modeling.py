@@ -1,19 +1,12 @@
 """
 modeling.py — Multi-model forecasting for Brent crude oil prices.
 
-TIME-SERIES CORRECT:
-  - Lag features (lag1m, lag2m, lag3m, lag6m, lag12m) are the PRIMARY inputs
-  - Rolling mean/std features included
-  - Trend + calendar features included
-  - NaN rows from lag warm-up are DROPPED (not filled with 0)
-  - Data is NEVER shuffled — temporal order preserved
-  - Validation split takes the last 15% of training rows (chronologically)
-
-Why this fixes negative R²:
-  SS_res > SS_tot happens when the model predicts worse than the mean.
-  Root cause was _clean_X filling lag-NaN rows with 0, training the model
-  on fake data, then predicting on real lags → catastrophic mismatch.
-  Fix: drop all rows with NaN features BEFORE fitting.
+FEATURE FIX:
+  Features are HARDCODED explicitly using exact column names from preprocessing.
+  No auto-selection. No crisis_flag. No raw prices.
+  Only lag, rolling, and pct-change columns are used.
+  NaN rows from lag warm-up are DROPPED before fitting.
+  Temporal order is NEVER shuffled.
 """
 
 from __future__ import annotations
@@ -44,7 +37,38 @@ MODEL_DIR.mkdir(parents=True, exist_ok=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Metrics
+# EXPLICIT FEATURE LIST — hardcoded exact column names from preprocessing.py
+# ─────────────────────────────────────────────────────────────────────────────
+
+FEATURES = [
+    # Brent lag features — primary signal
+    "brent_crude_lag1m",
+    "brent_crude_lag2m",
+    "brent_crude_lag3m",
+    "brent_crude_lag6m",
+    "brent_crude_lag12m",
+    # Brent rolling features — trend/volatility
+    "brent_crude_roll3m_mean",
+    "brent_crude_roll6m_mean",
+    "brent_crude_roll12m_mean",
+    "brent_crude_roll3m_std",
+    "brent_crude_roll6m_std",
+    # Brent momentum
+    "brent_crude_pct1m",
+    "brent_crude_pct3m",
+    # WTI lag — correlated market signal
+    "wti_crude_lag1m",
+    "wti_crude_lag3m",
+    # Spread
+    "brent_wti_spread",
+    # Calendar — seasonality
+    "month",
+    "quarter",
+]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
 def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
@@ -60,93 +84,43 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
     }
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Dynamic feature selection
-# Features are selected at fit-time from actual dataframe columns.
-# This guarantees lag columns are always used when present and nothing
-# leaks the current target value into X.
-# ─────────────────────────────────────────────────────────────────────────────
-
-# Explicit lightweight extras to include if present
-_EXTRA_FEATURES = ["month", "trend", "crisis_flag"]
-
-# Raw unlagged columns that must NEVER appear in X
-_FORBIDDEN = {
-    "brent_crude", "wti_crude", "natural_gas",
-    "us_cpi_energy", "world_crude_supply",
-    "crisis_name", "split",
-}
-
-
-def _select_features(df: pd.DataFrame, target: str = "brent_crude") -> list[str]:
-    """
-    Select features by column-name pattern — never includes raw target.
-
-    INCLUDE  columns whose name contains:
-               _lag  _roll  _momentum  _pct  _acceleration
-               _range_position  _vol_regime  _spread  _zscore  _x_momentum
-    INCLUDE  explicit extras: month, trend, crisis_flag
-    EXCLUDE  target column and all raw (unlagged) price/macro columns
-    """
-    pattern_include = (
-        "_lag", "_roll", "_momentum", "_pct",
-        "_acceleration", "_range_position", "_vol_regime",
-        "_spread", "_zscore", "_x_momentum",
-    )
-
-    selected = []
-    for col in df.columns:
-        if col == target or col in _FORBIDDEN:
-            continue
-        if col in _EXTRA_FEATURES or any(p in col for p in pattern_include):
-            selected.append(col)
-
-    if not selected:
-        raise ValueError(
-            "No valid features found. "
-            "Run preprocessing.build_master_dataset() to create lag/rolling columns."
-        )
-
-    for req in ("brent_crude_lag1m", "brent_crude_lag2m", "brent_crude_lag3m"):
-        if req not in selected:
-            logger.warning(f"Required lag feature '{req}' missing — re-run preprocessing.")
-
-    logger.info(f"  Selected {len(selected)} features. "
-                f"First 8: {selected[:8]}")
-    return selected
+def _get_features(df: pd.DataFrame) -> list[str]:
+    """Return only features that exist in df (guards against missing columns)."""
+    available = [f for f in FEATURES if f in df.columns]
+    missing   = [f for f in FEATURES if f not in df.columns]
+    if missing:
+        logger.warning(f"Missing features (will be skipped): {missing}")
+    logger.info(f"Using {len(available)} features: {available}")
+    return available
 
 
 def _prepare_Xy(
     df: pd.DataFrame,
     features: list[str],
-    target: str,
+    target: str = "brent_crude",
 ) -> tuple[pd.DataFrame, pd.Series]:
     """
-    Extract X, y and DROP any rows where X or y contains NaN.
-
-    This is the critical fix: rows created by lag warm-up have NaN in the
-    lag columns. Filling them with 0 teaches the model that 'price was 0
-    k months ago', which is wrong and causes predictions to be mean-like
-    or flat → negative R².
-
-    We drop these rows instead. After a 12-month warm-up the dataset is
-    still large enough for robust training.
+    Extract X and y, drop ALL rows where ANY value is NaN or inf.
+    This removes the lag warm-up rows (first 12 months) that have NaN lags.
+    Filling NaN with 0 causes flat predictions and negative R² — so we DROP.
     """
-    X = df[features].copy()
-    y = df[target].copy()
+    X = df[features].copy().replace([np.inf, -np.inf], np.nan)
+    y = df[target].copy().replace([np.inf, -np.inf], np.nan)
+    valid = X.notna().all(axis=1) & y.notna()
+    n_dropped = int((~valid).sum())
+    if n_dropped:
+        logger.debug(f"Dropped {n_dropped} NaN rows (lag warm-up)")
+    X_clean = X[valid]
+    y_clean = y[valid]
 
-    # Replace inf before NaN check
-    X = X.replace([np.inf, -np.inf], np.nan)
-    y = y.replace([np.inf, -np.inf], np.nan)
+    # ── DEBUG PROOF ────────────────────────────────────────────────────────────
+    logger.info(f"  X shape after NaN drop: {X_clean.shape}")
+    logger.info(f"  Features in X: {list(X_clean.columns)}")
+    logger.info(f"  X head (3 rows):\n{X_clean.head(3).to_string()}")
+    logger.info(f"  y head: {y_clean.head(3).values}")
+    # ──────────────────────────────────────────────────────────────────────────
 
-    # Combined mask: keep only rows where BOTH X and y are fully valid
-    valid_mask = X.notna().all(axis=1) & y.notna()
-
-    n_dropped = (~valid_mask).sum()
-    if n_dropped > 0:
-        logger.debug(f"  _prepare_Xy: dropped {n_dropped} NaN rows (lag warm-up)")
-
-    return X[valid_mask], y[valid_mask]
+    return X_clean, y_clean
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -161,29 +135,21 @@ class BaselineLinear:
             ("ridge",  Ridge(alpha=alpha)),
         ])
         self.features: list[str] = []
-        self._is_fit = False
+        self._is_fit  = False
 
     def fit(self, df_train: pd.DataFrame, target: str = "brent_crude") -> "BaselineLinear":
-        self.features = _select_features(df_train, target)
+        self.features = _get_features(df_train)
         X, y = _prepare_Xy(df_train, self.features, target)
         if len(X) == 0:
-            raise ValueError("No valid rows after dropping NaN — check preprocessing.")
-        logger.info(f"  X_train shape: {X.shape}")
-        logger.info(f"  X_train columns: {list(X.columns)}")
-        logger.info(f"  X_train head:\n{X.head(3).to_string()}")
+            raise ValueError("No valid rows after NaN drop.")
         self.model.fit(X, y)
         self._is_fit = True
-        logger.success(f"BaselineLinear: trained on {len(X)} rows, {len(self.features)} features.")
+        logger.success(f"BaselineLinear trained: {len(X)} rows, {len(self.features)} features.")
         return self
 
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
-        X, _ = _prepare_Xy(df_test, self.features, list(df_test.columns)[0])
-        # We need predictions for ALL test rows in order; use index alignment
-        X_full = df_test[self.features].replace([np.inf, -np.inf], np.nan)
-        # For test rows with any NaN feature, forward-fill within test set only
-        # (there should be none after get_train_test drops warm-up rows)
-        X_full = X_full.ffill().bfill()
-        return self.model.predict(X_full)
+        X = df_test[self.features].replace([np.inf, -np.inf], np.nan).ffill().bfill()
+        return self.model.predict(X)
 
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
         return evaluate_predictions(df_test[target].values, self.predict(df_test))
@@ -191,7 +157,6 @@ class BaselineLinear:
     def save(self, path: Optional[Path] = None) -> Path:
         path = path or MODEL_DIR / "baseline_linear.pkl"
         joblib.dump(self, path)
-        logger.info(f"Saved BaselineLinear → {path}")
         return path
 
     @classmethod
@@ -204,8 +169,7 @@ class BaselineLinear:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ARIMAForecaster:
-    def __init__(self, auto: bool = False):
-        self.auto      = auto
+    def __init__(self):
         self.model     = None
         self.fit_order = None
         self._is_fit   = False
@@ -231,13 +195,10 @@ class ARIMAForecaster:
     def predict(self, steps: int) -> np.ndarray:
         return self.model.forecast(steps=steps).values
 
-    def predict_in_sample(self, df_test: pd.DataFrame, target: str = "brent_crude") -> np.ndarray:
-        return self.predict(len(df_test))
-
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
         y_true = df_test[target].values
-        y_pred = self.predict_in_sample(df_test, target)
-        n      = min(len(y_true), len(y_pred))
+        y_pred = self.predict(len(df_test))
+        n = min(len(y_true), len(y_pred))
         return evaluate_predictions(y_true[:n], y_pred[:n])
 
     def save(self, path: Optional[Path] = None) -> Path:
@@ -254,42 +215,37 @@ class ARIMAForecaster:
 # 3. Random Forest
 # ─────────────────────────────────────────────────────────────────────────────
 
-_RF_PARAMS = {
-    "n_estimators":     500,
-    "max_depth":        8,
-    "min_samples_leaf": 3,
-    "max_features":     0.4,   # 40% per split → distributes importance
-    "random_state":     42,
-    "n_jobs":           -1,
-}
-
-
 class RandomForestModel:
-    def __init__(self, params: dict = _RF_PARAMS):
-        self.params   = params
-        self.model    = RandomForestRegressor(**params)
+    def __init__(self):
+        self.model = RandomForestRegressor(
+            n_estimators=500,
+            max_depth=8,
+            min_samples_leaf=3,
+            max_features=0.6,
+            random_state=42,
+            n_jobs=-1,
+        )
         self.features: list[str] = []
         self.feature_importances_: Optional[pd.Series] = None
         self._is_fit = False
 
     def fit(self, df_train: pd.DataFrame, target: str = "brent_crude") -> "RandomForestModel":
-        self.features = _select_features(df_train, target)
+        self.features = _get_features(df_train)
         X, y = _prepare_Xy(df_train, self.features, target)
         if len(X) == 0:
-            raise ValueError("No valid rows after dropping NaN.")
+            raise ValueError("No valid rows after NaN drop.")
         self.model.fit(X, y)
         self.feature_importances_ = pd.Series(
             self.model.feature_importances_, index=self.features
         ).sort_values(ascending=False)
         self._is_fit = True
-        logger.success(f"RandomForest: trained on {len(X)} rows. "
+        logger.success(f"RandomForest trained: {len(X)} rows. "
                        f"Top feature: {self.feature_importances_.idxmax()}")
         return self
 
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
-        X_full = df_test[self.features].replace([np.inf, -np.inf], np.nan)
-        X_full = X_full.ffill().bfill()
-        return self.model.predict(X_full)
+        X = df_test[self.features].replace([np.inf, -np.inf], np.nan).ffill().bfill()
+        return self.model.predict(X)
 
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
         return evaluate_predictions(df_test[target].values, self.predict(df_test))
@@ -308,35 +264,31 @@ class RandomForestModel:
 # 4. XGBoost
 # ─────────────────────────────────────────────────────────────────────────────
 
-_XGB_PARAMS = {
-    "n_estimators":     600,
-    "max_depth":        4,
-    "learning_rate":    0.025,
-    "subsample":        0.8,
-    "colsample_bytree": 0.5,
-    "min_child_weight": 4,
-    "reg_alpha":        0.05,
-    "reg_lambda":       1.5,
-    "random_state":     42,
-    "verbosity":        0,
-}
-
-
 class XGBoostModel:
-    def __init__(self, params: dict = _XGB_PARAMS):
-        self.params   = params
-        self.model    = XGBRegressor(**params)
+    def __init__(self):
+        self.model = XGBRegressor(
+            n_estimators=600,
+            max_depth=4,
+            learning_rate=0.025,
+            subsample=0.8,
+            colsample_bytree=0.6,
+            min_child_weight=4,
+            reg_alpha=0.05,
+            reg_lambda=1.5,
+            random_state=42,
+            verbosity=0,
+        )
         self.features: list[str] = []
         self.feature_importances_: Optional[pd.Series] = None
         self._is_fit = False
 
     def fit(self, df_train: pd.DataFrame, target: str = "brent_crude") -> "XGBoostModel":
-        self.features = _select_features(df_train, target)
+        self.features = _get_features(df_train)
         X, y = _prepare_Xy(df_train, self.features, target)
         if len(X) == 0:
-            raise ValueError("No valid rows after dropping NaN.")
+            raise ValueError("No valid rows after NaN drop.")
 
-        # Chronological validation split (last 15% of training rows)
+        # Chronological validation split — last 15% of training rows
         val_size = max(12, int(len(X) * 0.15))
         X_tr, X_val = X.iloc[:-val_size], X.iloc[-val_size:]
         y_tr, y_val = y.iloc[:-val_size], y.iloc[-val_size:]
@@ -347,14 +299,13 @@ class XGBoostModel:
             self.model.feature_importances_, index=self.features
         ).sort_values(ascending=False)
         self._is_fit = True
-        logger.success(f"XGBoost: trained on {len(X_tr)} rows. "
+        logger.success(f"XGBoost trained: {len(X_tr)} rows. "
                        f"Top feature: {self.feature_importances_.idxmax()}")
         return self
 
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
-        X_full = df_test[self.features].replace([np.inf, -np.inf], np.nan)
-        X_full = X_full.ffill().bfill()
-        return self.model.predict(X_full)
+        X = df_test[self.features].replace([np.inf, -np.inf], np.nan).ffill().bfill()
+        return self.model.predict(X)
 
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
         return evaluate_predictions(df_test[target].values, self.predict(df_test))
@@ -389,6 +340,7 @@ class ModelComparison:
 
         y_true = test[self.target].values
 
+        # ── Baseline Ridge ─────────────────────────────────────────────────────
         logger.info("Training Baseline Linear …")
         bl = BaselineLinear().fit(train, self.target)
         self.models["Baseline (Ridge)"]      = bl
@@ -397,10 +349,11 @@ class ModelComparison:
         self.predictions["Baseline (Ridge)"] = preds_bl
         self.metrics["Baseline (Ridge)"]     = evaluate_predictions(y_true, preds_bl)
 
+        # ── ARIMA ──────────────────────────────────────────────────────────────
         if fit_arima:
             logger.info("Training ARIMA …")
             try:
-                arima = ARIMAForecaster(auto=False).fit(train, self.target)
+                arima = ARIMAForecaster().fit(train, self.target)
                 self.models["ARIMA"] = arima
                 arima.save()
                 preds_ar = arima.predict(len(test))
@@ -410,6 +363,7 @@ class ModelComparison:
             except Exception as exc:
                 logger.warning(f"ARIMA training failed: {exc}")
 
+        # ── Random Forest ──────────────────────────────────────────────────────
         logger.info("Training Random Forest …")
         rf = RandomForestModel().fit(train, self.target)
         self.models["Random Forest"]      = rf
@@ -418,6 +372,7 @@ class ModelComparison:
         self.predictions["Random Forest"] = preds_rf
         self.metrics["Random Forest"]     = evaluate_predictions(y_true, preds_rf)
 
+        # ── XGBoost ────────────────────────────────────────────────────────────
         logger.info("Training XGBoost …")
         xgb = XGBoostModel().fit(train, self.target)
         self.models["XGBoost"]      = xgb
@@ -426,6 +381,7 @@ class ModelComparison:
         self.predictions["XGBoost"] = preds_xg
         self.metrics["XGBoost"]     = evaluate_predictions(y_true, preds_xg)
 
+        # ── Summary ────────────────────────────────────────────────────────────
         metrics_df = pd.DataFrame(self.metrics).T.sort_values("RMSE")
         logger.info("\n" + metrics_df.to_string())
 
@@ -437,16 +393,22 @@ class ModelComparison:
 
     def best_model(self) -> tuple[str, object]:
         if not self.metrics:
-            raise RuntimeError("No models trained yet. Call .run() first.")
-        best_name = min(self.metrics, key=lambda k: self.metrics[k]["RMSE"])
-        return best_name, self.models[best_name]
+            raise RuntimeError("No models trained yet.")
+        best = min(self.metrics, key=lambda k: self.metrics[k]["RMSE"])
+        return best, self.models[best]
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Quick local test
+# ─────────────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     from preprocessing import build_master_dataset, get_train_test
     master = build_master_dataset()
     train, test = get_train_test(master)
     mc = ModelComparison()
-    metrics, preds = mc.run(train, test)
+    metrics, preds = mc.run(train, test, fit_arima=False)
     print("\nModel Comparison:")
     print(metrics)
+    print("\nPrediction sample (first 5 rows):")
+    print(preds.head())
