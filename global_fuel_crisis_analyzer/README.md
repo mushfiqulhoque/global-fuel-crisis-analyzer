@@ -3,49 +3,73 @@
 > **An end-to-end data science system for analysing and predicting the impact of global fuel crises on oil prices and country-level fuel costs.**
 
 [![Python 3.11+](https://img.shields.io/badge/Python-3.11+-blue?logo=python&logoColor=white)](https://www.python.org)
-[![Streamlit](https://img.shields.io/badge/Streamlit-Dashboard-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io)
+[![Streamlit](https://img.shields.io/badge/Streamlit-Live%20Demo-FF4B4B?logo=streamlit&logoColor=white)](https://global-fuel-crisis-analyzer.streamlit.app)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+
+🔗 **Live Demo**: [global-fuel-crisis-analyzer.streamlit.app](https://global-fuel-crisis-analyzer.streamlit.app)
 
 ---
 
 ## 📌 Problem Statement
 
-Geopolitical conflicts, OPEC production cuts, and demand shocks routinely disrupt global crude oil supply—with cascading consequences for fuel prices, household budgets, and national inflation. Yet most publicly available analyses are retrospective, country-specific, and disconnected from real-time economic data.
+Geopolitical conflicts, OPEC production cuts, and demand shocks routinely disrupt global crude oil supply — with cascading consequences for fuel prices, household budgets, and national inflation. Yet most publicly available analyses are retrospective, country-specific, and disconnected from real-time economic data.
 
-This project builds a **production-quality analytical system** that:
+This project builds a production-quality analytical system that:
 
 1. Ingests live data from three institutional APIs (FRED, EIA, World Bank)
-2. Engineered a rich feature set from raw price and supply time series
+2. Engineers a rich feature set from raw price and supply time series
 3. Trains and compares four forecasting models (Ridge, ARIMA, Random Forest, XGBoost)
 4. Simulates arbitrary supply-shock scenarios and computes country-level fuel price and inflation impacts
 5. Delivers all results through an interactive Streamlit dashboard
 
 ---
 
-## 🏗️ Architecture
+## 🖥️ Dashboard Preview
+
+> 🔗 Try the live app: [global-fuel-crisis-analyzer.streamlit.app](https://global-fuel-crisis-analyzer.streamlit.app)
+
+### Supply Shock Simulator
+Simulate a global crude oil supply disruption and see real-time impact across 15 countries — including predicted Brent price, retail fuel delta, and monthly household cost increase.
+
+### Multi-Scenario Sensitivity Analysis
+Compare fuel price impact across multiple supply drop scenarios (5%–30%) with line charts and a country × severity heatmap.
+
+### Full Impact Table
+Detailed breakdown per country — base retail price, new retail price, delta, and CPI contribution.
+
+### Historical Oil Price Explorer (2000–2026)
+Interactive Brent & WTI price chart with all major crisis periods annotated — Gulf War II, GFC, Arab Spring, OPEC Price War, COVID Crash, Ukraine War, Israel–Hamas–Iran conflict, and US–Iran tensions.
+
+### Model Performance Metrics
+XGBoost achieves R² = 0.907 on the 2022–2026 test set. All three models are compared on RMSE, MAE, R², and MAPE.
+
+### Predictions vs Actual
+All three models tracked against real Brent crude prices on the held-out test set.
+
+### XGBoost Feature Importances
+Top features are `wti_crude_lag1m`, `brent_crude_roll3m_mean`, and `brent_crude_pct3m` — confirming the model is correctly learning from lagged price signals.
+
+---
+
+## 🏗️ Project Structure
 
 ```
 global_fuel_crisis_analyzer/
 │
 ├── src/
 │   ├── config.py            ← Centralised config (API keys, paths, model params)
-│   ├── data_collection.py   ← FRED, EIA, World Bank API clients
-│   ├── preprocessing.py     ← Cleaning, merging, feature engineering
-│   ├── modeling.py          ← Ridge, ARIMA, Random Forest, XGBoost
-│   ├── simulation.py        ← Supply shock engine
+│   ├── data_collection.py   ← FRED, EIA, World Bank API clients + SQLite caching
+│   ├── preprocessing.py     ← Cleaning, merging, lag/rolling feature engineering
+│   ├── modeling.py          ← Ridge, ARIMA, Random Forest, XGBoost + comparison
+│   ├── simulation.py        ← Supply shock engine (simulate_supply_shock)
 │   ├── visualization.py     ← Matplotlib & Plotly chart library
-│   └── sentiment.py         ← News headline sentiment (bonus)
+│   └── sentiment.py         ← News headline NLP sentiment (TextBlob + HuggingFace)
 │
 ├── app/
 │   └── app.py               ← Streamlit dashboard (4-tab interactive app)
 │
 ├── notebooks/
 │   └── 01_exploratory_analysis.ipynb
-│
-├── data/
-│   ├── raw/                 ← API response CSVs
-│   ├── processed/           ← Feature-engineered master dataset
-│   └── cache/               ← SQLite request cache (requests-cache)
 │
 ├── requirements.txt
 ├── .env.example
@@ -56,50 +80,54 @@ global_fuel_crisis_analyzer/
 
 ## 📡 Data Sources
 
-| Source | Data | Endpoint | Auth |
-|--------|------|----------|------|
-| **FRED** (St. Louis Fed) | Brent & WTI crude, CPI-energy, natural gas | `api.stlouisfed.org/fred` | Free API key |
-| **EIA** (U.S. Energy Info. Admin.) | World crude oil supply (TBPD) | `api.eia.gov/series` | Free API key |
-| **World Bank** | GDP per capita, fuel imports %, energy use per capita, oil rents | `api.worldbank.org/v2` | None required |
-| **GNews** *(optional)* | Recent oil market headlines | `gnews.io/api/v4` | Free API key |
+| Source | Data | Auth |
+|--------|------|------|
+| **FRED** (St. Louis Fed) | Brent & WTI crude prices, CPI-energy, natural gas | Free API key |
+| **EIA** (U.S. Energy Info. Admin.) | World crude oil supply (TBPD, monthly) | Free API key |
+| **World Bank** | GDP per capita, fuel imports %, energy use per capita, oil rents | None required |
+| **GNews** *(optional)* | Recent oil market headlines for sentiment analysis | Free API key |
 
-All API responses are cached to SQLite for 24 hours — safe for development iteration.
+All API responses are cached to SQLite for 24 hours to avoid rate limits during development.
 
 ---
 
 ## 🔬 Methodology
 
-### Data Processing
-- Monthly resampling for temporal alignment across sources
-- IQR-fenced outlier removal (factor = 3.0; preserves genuine price spikes)
+### Feature Engineering
+- Monthly resampling for temporal alignment across all sources
+- IQR-fenced outlier removal (factor = 3.0 — preserves genuine price spikes)
 - Forward-fill (≤3 periods) + time-based interpolation for short gaps
-- Feature engineering: rolling means/std (3m, 6m, 12m), % changes (1m, 3m, 12m), lag features (1–12m)
-- Crisis period labelling (6 historical events since 2000)
+- Lag features: 1m, 2m, 3m, 6m, 12m
+- Rolling mean and std: 3m, 6m, 12m windows
+- Percentage change features: 1m, 3m
+- Crisis period labelling for 8 historical events (2000–2026)
 
 ### Models
 
-| Model | Type | Notes |
-|-------|------|-------|
-| **Baseline (Ridge)** | Linear regression | OLS on lag + macro features; L2 regularised |
-| **ARIMA/SARIMA** | Time series | `pmdarima.auto_arima` or manual `(2,1,2)×(1,1,1,12)` |
-| **Random Forest** | Ensemble | 300 estimators, depth 8; feature importance |
-| **XGBoost** | Gradient boosting | 300 rounds, η=0.05; typically best RMSE |
+| Model | Type | Test R² | Notes |
+|-------|------|---------|-------|
+| **XGBoost** ★ | Gradient boosting | **0.907** | Best performer; lag + rolling features |
+| **Baseline (Ridge)** | Linear regression | 0.844 | L2 regularised; StandardScaler pipeline |
+| **Random Forest** | Ensemble | 0.828 | 500 estimators, depth 8 |
+| **ARIMA/SARIMA** | Time series | — | Manual order (2,1,2)×(1,1,1,12) |
 
-**Evaluation**: RMSE, MAE, R², MAPE on held-out test set (2022–present).
+**Evaluation**: RMSE, MAE, R², MAPE on held-out test set (Jan 2022 – Mar 2026).
+
+**Key finding**: Top features are `wti_crude_lag1m`, `brent_crude_roll3m_mean`, and `brent_crude_pct3m` — confirming the model learns from recent price momentum, not from spurious variables.
 
 ### Supply Shock Simulation
 
-The core engine uses the **short-run price elasticity of supply** (ε ≈ −0.08, from Hamilton 2009 & Kilian 2014):
+The core engine uses the **short-run price elasticity of supply** (ε ≈ −0.30) with a nonlinear tanh saturation for large shocks:
 
 ```
-pct_price_change = supply_drop_fraction / elasticity
+saturated_pct_change = 0.85 × tanh(supply_drop / (|elasticity| × 0.85))
 ```
 
-For shocks exceeding 10%, a Gaussian nonlinear amplifier captures the empirically observed *panic premium*. Country-level retail impacts are computed via:
+Country-level retail impacts:
 
 ```
-retail_delta = base_retail × brent_delta_pct × passthrough_rate
-inflation_contribution = (retail_delta / base_retail) × fuel_cpi_weight
+retail_delta    = base_retail × brent_delta_pct × passthrough_rate × country_factors
+inflation_proxy = (retail_delta / base_retail) × fuel_cpi_weight
 ```
 
 Country multipliers encode crude-to-pump markups, taxation, and subsidy structures calibrated from IEA and GlobalPetrolPrices.com (2022 baseline).
@@ -108,72 +136,52 @@ Country multipliers encode crude-to-pump markups, taxation, and subsidy structur
 
 ## 📊 Key Results
 
-| Scenario | Brent Δ | Most Impacted Country | Global CPI Proxy |
-|----------|---------|-----------------------|------------------|
-| 5% supply drop  | +6.25%  | Germany (+4.69%) | +0.026 pp |
-| 10% supply drop | +12.50% | Germany (+9.38%) | +0.051 pp |
-| 20% supply drop | +38.0%* | Germany (+28.5%) | +0.156 pp |
-| 30% supply drop | +80.9%* | Germany (+60.7%) | +0.333 pp |
+| Scenario | Brent Δ | Most Impacted | Least Impacted | Global CPI |
+|----------|---------|----------------|----------------|------------|
+| 5% supply drop  | +16.7% | Turkey / Germany | Saudi Arabia / Russia | +0.026 pp |
+| 10% supply drop | +30.3% | Turkey / Germany | Saudi Arabia / Russia | +0.051 pp |
+| 15% supply drop | +41.2% | Turkey / Germany | Saudi Arabia / Russia | +0.067 pp |
+| 20% supply drop | +49.5% | Turkey / Germany | Saudi Arabia / Russia | +0.081 pp |
+| 30% supply drop | +61.2% | Turkey / Germany | Saudi Arabia / Russia | +0.100 pp |
 
-*Nonlinear amplification applied for >10% shocks.
-
-**Best model**: XGBoost achieves the lowest RMSE on the 2022+ test set.  
-**Most important features**: 1-month lag price, 12-month rolling mean, crisis flag.
+**Germany, Turkey, and the UK are consistently the most vulnerable** due to high import dependency and fuel tax structures. Saudi Arabia and Russia are least affected due to domestic production. The nonlinear (tanh) shock model captures diminishing marginal price increases at higher disruption levels.
 
 ---
 
 ## 🚀 Quick Start
 
-### 1. Clone & set up environment
+### 1. Clone and set up
 
 ```bash
-git clone https://github.com/your-username/global-fuel-crisis-analyzer.git
+git clone https://github.com/mushfiqulhoque/global-fuel-crisis-analyzer.git
 cd global-fuel-crisis-analyzer
-
-python -m venv venv
-source venv/bin/activate   # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. Configure API keys
+### 2. Add API keys (optional — app works without them using synthetic data)
 
 ```bash
 cp .env.example .env
-# Edit .env and add your FRED_API_KEY and EIA_API_KEY
+# Edit .env and add FRED_API_KEY and EIA_API_KEY (both free)
 ```
 
-### 3. Collect data
+### 3. Launch the dashboard
 
 ```bash
-cd src
-python data_collection.py
-```
-
-### 4. Build master dataset
-
-```bash
-python preprocessing.py
-```
-
-### 5. Train models
-
-```bash
-python modeling.py
-```
-
-### 6. Run simulation (CLI)
-
-```bash
-python simulation.py
-```
-
-### 7. Launch the dashboard
-
-```bash
-streamlit run app/app.py
+python -m streamlit run global_fuel_crisis_analyzer/app/app.py
 ```
 
 Visit `http://localhost:8501` in your browser.
+
+### 4. (Optional) Run the full data pipeline
+
+```bash
+cd global_fuel_crisis_analyzer/src
+python data_collection.py     # fetch from APIs
+python preprocessing.py       # build master dataset
+python modeling.py            # train and evaluate models
+python simulation.py          # run supply shock demo
+```
 
 ---
 
@@ -188,20 +196,25 @@ Visit `http://localhost:8501` in your browser.
 | NLP / Sentiment | `textblob`, `transformers` |
 | Visualisation | `matplotlib`, `seaborn`, `plotly` |
 | Dashboard | `streamlit` |
-| Utilities | `loguru`, `python-dotenv`, `joblib`, `pydantic` |
+| Utilities | `loguru`, `python-dotenv`, `joblib` |
+
+---
+
+## 🌍 Countries Covered
+
+Bangladesh, Brazil, China, Germany, India, Indonesia, Japan, Nigeria, Pakistan, Russia, Saudi Arabia, South Africa, Turkey, United Kingdom, United States
 
 ---
 
 ## 🔮 Future Improvements
 
-1. **Real-time pipeline** — Schedule data collection via Apache Airflow or Prefect; push to a time-series database (InfluxDB or TimescaleDB).
-2. **Deep learning** — Replace XGBoost with a Temporal Fusion Transformer (TFT) for multi-horizon probabilistic forecasting.
-3. **Geospatial layer** — Add choropleth maps for visualising country vulnerability scores.
-4. **Commodity linkages** — Extend to natural gas, coal, and electricity prices for a full energy crisis model.
-5. **LLM-augmented reasoning** — Integrate a large language model to auto-generate natural language shock summaries.
-6. **FinBERT sentiment** — Replace TextBlob with a finance-domain-tuned BERT for more accurate news sentiment.
-7. **Containerisation** — Dockerfile + docker-compose for reproducible, portable deployment.
-8. **Unit tests** — pytest suite covering data validation, feature engineering, and simulation math.
+1. **Real-time pipeline** — Apache Airflow or Prefect for scheduled data collection
+2. **Deep learning** — Temporal Fusion Transformer (TFT) for probabilistic forecasting
+3. **Geospatial layer** — Choropleth maps showing country vulnerability scores
+4. **Commodity linkages** — Extend to natural gas, coal, and electricity prices
+5. **FinBERT sentiment** — Replace TextBlob with finance-domain BERT
+6. **Containerisation** — Dockerfile + docker-compose for portable deployment
+7. **Unit tests** — pytest suite for data validation and simulation math
 
 ---
 
@@ -216,12 +229,8 @@ Visit `http://localhost:8501` in your browser.
 
 ## 👤 Author
 
-**[Md Mushfiqul Hoque]** 
+**Md Mushfiqul Hoque** — Data Analyst | Aspiring Data Scientist
+
 Built as a portfolio project demonstrating end-to-end data science engineering.
----
 
-## 📝 License
-
-
-
-This project is free and open source — created by **Md Mushfiqul Hoque**.
+🔗 [Live Demo](https://global-fuel-crisis-analyzer.streamlit.app) · 💻 [GitHub](https://github.com/mushfiqulhoque/global-fuel-crisis-analyzer)
