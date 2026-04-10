@@ -186,7 +186,7 @@ class BaselineLinear:
         X_full = df_test[self.features].replace([np.inf, -np.inf], np.nan)
         # For test rows with any NaN feature, forward-fill within test set only
         # (there should be none after get_train_test drops warm-up rows)
-        X_full = X_full.ffill().fillna(method="bfill")
+        X_full = X_full.ffill().bfill()
         return self.model.predict(X_full)
 
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
@@ -292,7 +292,7 @@ class RandomForestModel:
 
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
         X_full = df_test[self.features].replace([np.inf, -np.inf], np.nan)
-        X_full = X_full.ffill().fillna(method="bfill")
+        X_full = X_full.ffill().bfill()
         return self.model.predict(X_full)
 
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
@@ -357,7 +357,7 @@ class XGBoostModel:
 
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
         X_full = df_test[self.features].replace([np.inf, -np.inf], np.nan)
-        X_full = X_full.ffill().fillna(method="bfill")
+        X_full = X_full.ffill().bfill()
         return self.model.predict(X_full)
 
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
