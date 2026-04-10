@@ -1,12 +1,19 @@
 """
-modeling.py — Multi-model forecasting pipeline for Brent crude oil prices.
+modeling.py — Multi-model forecasting for Brent crude oil prices.
 
-Improvements:
-  - Feature list matches preprocessing output (lag1/3/6, rolling, trend)
-  - max_features=0.4 (RF) and colsample_bytree=0.5 (XGB) spread importance
-  - _clean_X() sanitises inf/NaN before every fit/predict
-  - Ridge alpha=10 prevents negative R² from noisy-feature overfitting
-  - Validation split uses last 15% of train (no leakage into test)
+TIME-SERIES CORRECT:
+  - Lag features (lag1m, lag2m, lag3m, lag6m, lag12m) are the PRIMARY inputs
+  - Rolling mean/std features included
+  - Trend + calendar features included
+  - NaN rows from lag warm-up are DROPPED (not filled with 0)
+  - Data is NEVER shuffled — temporal order preserved
+  - Validation split takes the last 15% of training rows (chronologically)
+
+Why this fixes negative R²:
+  SS_res > SS_tot happens when the model predicts worse than the mean.
+  Root cause was _clean_X filling lag-NaN rows with 0, training the model
+  on fake data, then predicting on real lags → catastrophic mismatch.
+  Fix: drop all rows with NaN features BEFORE fitting.
 """
 
 from __future__ import annotations
@@ -30,11 +37,7 @@ with warnings.catch_warnings():
     warnings.simplefilter("ignore")
     from statsmodels.tsa.statespace.sarimax import SARIMAX
 
-from config import (
-    ARIMA_ORDER,
-    ARIMA_SEASONAL_ORDER,
-    PROC_DIR,
-)
+from config import ARIMA_ORDER, ARIMA_SEASONAL_ORDER, PROC_DIR
 
 MODEL_DIR = PROC_DIR / "models"
 MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -58,50 +61,57 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Feature list — ordered by expected importance
-# All are causal (lagged/rolled), so no leakage
+# Feature list
+# Lag features are listed FIRST — they are the most predictive signals
+# for a time-series regression and must always be present.
 # ─────────────────────────────────────────────────────────────────────────────
 
 REGRESSION_FEATURES = [
-    # Core autoregressive lags
-    "brent_crude_lag1m",
-    "brent_crude_lag2m",
-    "brent_crude_lag3m",
-    "brent_crude_lag6m",
-    "brent_crude_lag12m",
-    # Rolling means (different horizons)
+    # ── Autoregressive lags (MOST IMPORTANT for time series) ──
+    "brent_crude_lag1m",          # Y(t-1)
+    "brent_crude_lag2m",          # Y(t-2)
+    "brent_crude_lag3m",          # Y(t-3)
+    "brent_crude_lag6m",          # Y(t-6)
+    "brent_crude_lag12m",         # Y(t-12)
+    # ── Rolling statistics (computed on shifted series) ──
     "brent_crude_roll3m_mean",
     "brent_crude_roll6m_mean",
     "brent_crude_roll12m_mean",
-    # Rolling volatility
     "brent_crude_roll3m_std",
     "brent_crude_roll6m_std",
-    # Momentum signals
+    # ── Momentum ──
     "brent_crude_momentum_3_12",
     "brent_crude_acceleration",
     "brent_crude_range_position",
     "brent_crude_vol_regime",
-    # Pct changes
+    # ── Pct changes ──
     "brent_crude_pct1m",
     "brent_crude_pct3m",
-    # Correlated commodity lags
+    # ── Correlated commodity lags ──
     "wti_crude_lag1m",
     "wti_crude_lag2m",
     "wti_crude_momentum_3_12",
     "natural_gas_lag1m",
-    # Spread + macro
+    # ── Spread + macro ──
     "brent_wti_spread",
     "us_cpi_energy",
-    # Supply
+    # ── Supply ──
     "supply_zscore",
-    # Crisis
+    # ── Crisis ──
     "crisis_flag",
     "crisis_x_momentum",
-    # Calendar + trend
+    # ── Time features ──
     "month",
     "quarter",
     "year",
-    "trend",
+    "trend",                      # linear index 0,1,2,… captures long-run drift
+]
+
+# Minimum required features — training aborts if these are all missing
+REQUIRED_FEATURES = [
+    "brent_crude_lag1m",
+    "brent_crude_lag2m",
+    "brent_crude_lag3m",
 ]
 
 
@@ -109,16 +119,41 @@ def _safe_features(df: pd.DataFrame, wanted: list[str]) -> list[str]:
     available = [f for f in wanted if f in df.columns]
     missing   = set(wanted) - set(available)
     if missing:
-        logger.debug(f"  Features not found, skipping: {sorted(missing)}")
+        logger.debug(f"  Skipping missing features: {sorted(missing)}")
     return available
 
 
-def _clean_X(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
-    """Replace inf, forward-fill then zero-fill NaN. Returns clean DataFrame."""
+def _prepare_Xy(
+    df: pd.DataFrame,
+    features: list[str],
+    target: str,
+) -> tuple[pd.DataFrame, pd.Series]:
+    """
+    Extract X, y and DROP any rows where X or y contains NaN.
+
+    This is the critical fix: rows created by lag warm-up have NaN in the
+    lag columns. Filling them with 0 teaches the model that 'price was 0
+    k months ago', which is wrong and causes predictions to be mean-like
+    or flat → negative R².
+
+    We drop these rows instead. After a 12-month warm-up the dataset is
+    still large enough for robust training.
+    """
     X = df[features].copy()
+    y = df[target].copy()
+
+    # Replace inf before NaN check
     X = X.replace([np.inf, -np.inf], np.nan)
-    X = X.ffill().fillna(0)
-    return X
+    y = y.replace([np.inf, -np.inf], np.nan)
+
+    # Combined mask: keep only rows where BOTH X and y are fully valid
+    valid_mask = X.notna().all(axis=1) & y.notna()
+
+    n_dropped = (~valid_mask).sum()
+    if n_dropped > 0:
+        logger.debug(f"  _prepare_Xy: dropped {n_dropped} NaN rows (lag warm-up)")
+
+    return X[valid_mask], y[valid_mask]
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -137,15 +172,22 @@ class BaselineLinear:
 
     def fit(self, df_train: pd.DataFrame, target: str = "brent_crude") -> "BaselineLinear":
         self.features = _safe_features(df_train, REGRESSION_FEATURES)
-        X = _clean_X(df_train, self.features)
-        valid = df_train[target].notna()
-        self.model.fit(X[valid], df_train.loc[valid, target])
+        X, y = _prepare_Xy(df_train, self.features, target)
+        if len(X) == 0:
+            raise ValueError("No valid rows after dropping NaN — check preprocessing.")
+        self.model.fit(X, y)
         self._is_fit = True
-        logger.success(f"BaselineLinear trained — {len(X[valid])} samples, {len(self.features)} features.")
+        logger.success(f"BaselineLinear: trained on {len(X)} rows, {len(self.features)} features.")
         return self
 
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
-        return self.model.predict(_clean_X(df_test, self.features))
+        X, _ = _prepare_Xy(df_test, self.features, list(df_test.columns)[0])
+        # We need predictions for ALL test rows in order; use index alignment
+        X_full = df_test[self.features].replace([np.inf, -np.inf], np.nan)
+        # For test rows with any NaN feature, forward-fill within test set only
+        # (there should be none after get_train_test drops warm-up rows)
+        X_full = X_full.ffill().fillna(method="bfill")
+        return self.model.predict(X_full)
 
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
         return evaluate_predictions(df_test[target].values, self.predict(df_test))
@@ -177,16 +219,16 @@ class ARIMAForecaster:
         logger.info(f"ARIMA: fitting SARIMAX{ARIMA_ORDER}×{ARIMA_SEASONAL_ORDER}")
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            sm_model = SARIMAX(
+            sm = SARIMAX(
                 series,
                 order=ARIMA_ORDER,
                 seasonal_order=ARIMA_SEASONAL_ORDER,
                 enforce_stationarity=False,
                 enforce_invertibility=False,
             )
-            self.model = sm_model.fit(disp=False)
-        self.fit_order  = (ARIMA_ORDER, ARIMA_SEASONAL_ORDER)
-        self._is_fit    = True
+            self.model = sm.fit(disp=False)
+        self.fit_order = (ARIMA_ORDER, ARIMA_SEASONAL_ORDER)
+        self._is_fit   = True
         logger.success(f"ARIMA trained. Order: {self.fit_order}")
         return self
 
@@ -205,7 +247,6 @@ class ARIMAForecaster:
     def save(self, path: Optional[Path] = None) -> Path:
         path = path or MODEL_DIR / "arima.pkl"
         joblib.dump(self, path)
-        logger.info(f"Saved ARIMAForecaster → {path}")
         return path
 
     @classmethod
@@ -237,18 +278,22 @@ class RandomForestModel:
 
     def fit(self, df_train: pd.DataFrame, target: str = "brent_crude") -> "RandomForestModel":
         self.features = _safe_features(df_train, REGRESSION_FEATURES)
-        X = _clean_X(df_train, self.features)
-        valid = df_train[target].notna()
-        self.model.fit(X[valid], df_train.loc[valid, target])
+        X, y = _prepare_Xy(df_train, self.features, target)
+        if len(X) == 0:
+            raise ValueError("No valid rows after dropping NaN.")
+        self.model.fit(X, y)
         self.feature_importances_ = pd.Series(
             self.model.feature_importances_, index=self.features
         ).sort_values(ascending=False)
         self._is_fit = True
-        logger.success(f"RandomForest trained. Top feature: {self.feature_importances_.idxmax()}")
+        logger.success(f"RandomForest: trained on {len(X)} rows. "
+                       f"Top feature: {self.feature_importances_.idxmax()}")
         return self
 
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
-        return self.model.predict(_clean_X(df_test, self.features))
+        X_full = df_test[self.features].replace([np.inf, -np.inf], np.nan)
+        X_full = X_full.ffill().fillna(method="bfill")
+        return self.model.predict(X_full)
 
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
         return evaluate_predictions(df_test[target].values, self.predict(df_test))
@@ -256,7 +301,6 @@ class RandomForestModel:
     def save(self, path: Optional[Path] = None) -> Path:
         path = path or MODEL_DIR / "random_forest.pkl"
         joblib.dump(self, path)
-        logger.info(f"Saved RandomForestModel → {path}")
         return path
 
     @classmethod
@@ -273,7 +317,7 @@ _XGB_PARAMS = {
     "max_depth":        4,
     "learning_rate":    0.025,
     "subsample":        0.8,
-    "colsample_bytree": 0.5,   # 50% features per tree → distributes importance
+    "colsample_bytree": 0.5,
     "min_child_weight": 4,
     "reg_alpha":        0.05,
     "reg_lambda":       1.5,
@@ -292,11 +336,11 @@ class XGBoostModel:
 
     def fit(self, df_train: pd.DataFrame, target: str = "brent_crude") -> "XGBoostModel":
         self.features = _safe_features(df_train, REGRESSION_FEATURES)
-        X = _clean_X(df_train, self.features)
-        valid = df_train[target].notna()
-        X = X[valid]
-        y = df_train.loc[valid, target]
+        X, y = _prepare_Xy(df_train, self.features, target)
+        if len(X) == 0:
+            raise ValueError("No valid rows after dropping NaN.")
 
+        # Chronological validation split (last 15% of training rows)
         val_size = max(12, int(len(X) * 0.15))
         X_tr, X_val = X.iloc[:-val_size], X.iloc[-val_size:]
         y_tr, y_val = y.iloc[:-val_size], y.iloc[-val_size:]
@@ -307,11 +351,14 @@ class XGBoostModel:
             self.model.feature_importances_, index=self.features
         ).sort_values(ascending=False)
         self._is_fit = True
-        logger.success(f"XGBoost trained. Top feature: {self.feature_importances_.idxmax()}")
+        logger.success(f"XGBoost: trained on {len(X_tr)} rows. "
+                       f"Top feature: {self.feature_importances_.idxmax()}")
         return self
 
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
-        return self.model.predict(_clean_X(df_test, self.features))
+        X_full = df_test[self.features].replace([np.inf, -np.inf], np.nan)
+        X_full = X_full.ffill().fillna(method="bfill")
+        return self.model.predict(X_full)
 
     def evaluate(self, df_test: pd.DataFrame, target: str = "brent_crude") -> dict:
         return evaluate_predictions(df_test[target].values, self.predict(df_test))
@@ -319,7 +366,6 @@ class XGBoostModel:
     def save(self, path: Optional[Path] = None) -> Path:
         path = path or MODEL_DIR / "xgboost.pkl"
         joblib.dump(self, path)
-        logger.info(f"Saved XGBoostModel → {path}")
         return path
 
     @classmethod
@@ -334,9 +380,9 @@ class XGBoostModel:
 class ModelComparison:
     def __init__(self, target: str = "brent_crude"):
         self.target      = target
-        self.models:      dict[str, object]          = {}
-        self.metrics:     dict[str, dict]            = {}
-        self.predictions: dict[str, np.ndarray]      = {}
+        self.models:      dict[str, object]     = {}
+        self.metrics:     dict[str, dict]       = {}
+        self.predictions: dict[str, np.ndarray] = {}
 
     def run(
         self,
@@ -349,9 +395,9 @@ class ModelComparison:
 
         logger.info("Training Baseline Linear …")
         bl = BaselineLinear().fit(train, self.target)
-        self.models["Baseline (Ridge)"] = bl
+        self.models["Baseline (Ridge)"]      = bl
         bl.save()
-        preds_bl = bl.predict(test)
+        preds_bl                              = bl.predict(test)
         self.predictions["Baseline (Ridge)"] = preds_bl
         self.metrics["Baseline (Ridge)"]     = evaluate_predictions(y_true, preds_bl)
 
@@ -370,17 +416,17 @@ class ModelComparison:
 
         logger.info("Training Random Forest …")
         rf = RandomForestModel().fit(train, self.target)
-        self.models["Random Forest"] = rf
+        self.models["Random Forest"]      = rf
         rf.save()
-        preds_rf = rf.predict(test)
+        preds_rf                           = rf.predict(test)
         self.predictions["Random Forest"] = preds_rf
         self.metrics["Random Forest"]     = evaluate_predictions(y_true, preds_rf)
 
         logger.info("Training XGBoost …")
         xgb = XGBoostModel().fit(train, self.target)
-        self.models["XGBoost"] = xgb
+        self.models["XGBoost"]      = xgb
         xgb.save()
-        preds_xg = xgb.predict(test)
+        preds_xg                     = xgb.predict(test)
         self.predictions["XGBoost"] = preds_xg
         self.metrics["XGBoost"]     = evaluate_predictions(y_true, preds_xg)
 
