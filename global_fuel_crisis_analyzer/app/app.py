@@ -186,11 +186,9 @@ def _build_features(df: pd.DataFrame) -> pd.DataFrame:
         for p in [1, 3, 12]:
             df[f"{col}_pct{p}m"] = df[col].pct_change(p) * 100
 
-    # Spread
     if "brent_crude" in df.columns and "wti_crude" in df.columns:
         df["brent_wti_spread"] = df["brent_crude"] - df["wti_crude"]
 
-    # Calendar
     df["month"]   = df.index.month
     df["quarter"] = df.index.quarter
 
@@ -459,7 +457,7 @@ def tab_history(master_df: pd.DataFrame) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tab 3 — Model Comparison  (FIXED: builds features inline, no get_train_test)
+# Tab 3 — Model Comparison
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tab_models(master_df: pd.DataFrame) -> None:
@@ -473,10 +471,7 @@ def tab_models(master_df: pd.DataFrame) -> None:
             try:
                 from modeling import ModelComparison
 
-                # Build lag/rolling features directly from master_df
                 df_feat = _build_features(master_df)
-
-                # Split chronologically — no dependency on get_train_test
                 train, test = _split_train_test(df_feat, split_date="2022-01-01")
 
                 if len(train) == 0 or len(test) == 0:
@@ -540,7 +535,7 @@ def tab_models(master_df: pd.DataFrame) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tab 4 — Sentiment Analysis
+# Tab 4 — Sentiment Analysis  (FIXED: applymap → map)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tab_sentiment() -> None:
@@ -595,14 +590,19 @@ def tab_sentiment() -> None:
         st.subheader("Headline Details")
         display_cols = [c for c in ["date", "source", "headline", "polarity", "label"]
                         if c in scored.columns]
+
+        # ── FIX: use .map() instead of deprecated .applymap() ─────────────────
+        def _color_label(v: str) -> str:
+            if v == "positive":
+                return "color: #4CAF50"
+            elif v == "negative":
+                return "color: #F44336"
+            return ""
+
         st.dataframe(
             scored[display_cols]
             .sort_values("date", ascending=False)
-            .style.applymap(
-                lambda v: "color: #4CAF50" if v == "positive" else
-                          ("color: #F44336" if v == "negative" else ""),
-                subset=["label"],
-            ),
+            .style.map(_color_label, subset=["label"]),
             use_container_width=True,
         )
     else:
