@@ -61,66 +61,59 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Feature list
-# Lag features are listed FIRST — they are the most predictive signals
-# for a time-series regression and must always be present.
+# Dynamic feature selection
+# Features are selected at fit-time from actual dataframe columns.
+# This guarantees lag columns are always used when present and nothing
+# leaks the current target value into X.
 # ─────────────────────────────────────────────────────────────────────────────
 
-REGRESSION_FEATURES = [
-    # ── Autoregressive lags (MOST IMPORTANT for time series) ──
-    "brent_crude_lag1m",          # Y(t-1)
-    "brent_crude_lag2m",          # Y(t-2)
-    "brent_crude_lag3m",          # Y(t-3)
-    "brent_crude_lag6m",          # Y(t-6)
-    "brent_crude_lag12m",         # Y(t-12)
-    # ── Rolling statistics (computed on shifted series) ──
-    "brent_crude_roll3m_mean",
-    "brent_crude_roll6m_mean",
-    "brent_crude_roll12m_mean",
-    "brent_crude_roll3m_std",
-    "brent_crude_roll6m_std",
-    # ── Momentum ──
-    "brent_crude_momentum_3_12",
-    "brent_crude_acceleration",
-    "brent_crude_range_position",
-    "brent_crude_vol_regime",
-    # ── Pct changes ──
-    "brent_crude_pct1m",
-    "brent_crude_pct3m",
-    # ── Correlated commodity lags ──
-    "wti_crude_lag1m",
-    "wti_crude_lag2m",
-    "wti_crude_momentum_3_12",
-    "natural_gas_lag1m",
-    # ── Spread + macro ──
-    "brent_wti_spread",
-    "us_cpi_energy",
-    # ── Supply ──
-    "supply_zscore",
-    # ── Crisis ──
-    "crisis_flag",
-    "crisis_x_momentum",
-    # ── Time features ──
-    "month",
-    "quarter",
-    "year",
-    "trend",                      # linear index 0,1,2,… captures long-run drift
-]
+# Explicit lightweight extras to include if present
+_EXTRA_FEATURES = ["month", "trend", "crisis_flag"]
 
-# Minimum required features — training aborts if these are all missing
-REQUIRED_FEATURES = [
-    "brent_crude_lag1m",
-    "brent_crude_lag2m",
-    "brent_crude_lag3m",
-]
+# Raw unlagged columns that must NEVER appear in X
+_FORBIDDEN = {
+    "brent_crude", "wti_crude", "natural_gas",
+    "us_cpi_energy", "world_crude_supply",
+    "crisis_name", "split",
+}
 
 
-def _safe_features(df: pd.DataFrame, wanted: list[str]) -> list[str]:
-    available = [f for f in wanted if f in df.columns]
-    missing   = set(wanted) - set(available)
-    if missing:
-        logger.debug(f"  Skipping missing features: {sorted(missing)}")
-    return available
+def _select_features(df: pd.DataFrame, target: str = "brent_crude") -> list[str]:
+    """
+    Select features by column-name pattern — never includes raw target.
+
+    INCLUDE  columns whose name contains:
+               _lag  _roll  _momentum  _pct  _acceleration
+               _range_position  _vol_regime  _spread  _zscore  _x_momentum
+    INCLUDE  explicit extras: month, trend, crisis_flag
+    EXCLUDE  target column and all raw (unlagged) price/macro columns
+    """
+    pattern_include = (
+        "_lag", "_roll", "_momentum", "_pct",
+        "_acceleration", "_range_position", "_vol_regime",
+        "_spread", "_zscore", "_x_momentum",
+    )
+
+    selected = []
+    for col in df.columns:
+        if col == target or col in _FORBIDDEN:
+            continue
+        if col in _EXTRA_FEATURES or any(p in col for p in pattern_include):
+            selected.append(col)
+
+    if not selected:
+        raise ValueError(
+            "No valid features found. "
+            "Run preprocessing.build_master_dataset() to create lag/rolling columns."
+        )
+
+    for req in ("brent_crude_lag1m", "brent_crude_lag2m", "brent_crude_lag3m"):
+        if req not in selected:
+            logger.warning(f"Required lag feature '{req}' missing — re-run preprocessing.")
+
+    logger.info(f"  Selected {len(selected)} features. "
+                f"First 8: {selected[:8]}")
+    return selected
 
 
 def _prepare_Xy(
@@ -171,10 +164,13 @@ class BaselineLinear:
         self._is_fit = False
 
     def fit(self, df_train: pd.DataFrame, target: str = "brent_crude") -> "BaselineLinear":
-        self.features = _safe_features(df_train, REGRESSION_FEATURES)
+        self.features = _select_features(df_train, target)
         X, y = _prepare_Xy(df_train, self.features, target)
         if len(X) == 0:
             raise ValueError("No valid rows after dropping NaN — check preprocessing.")
+        logger.info(f"  X_train shape: {X.shape}")
+        logger.info(f"  X_train columns: {list(X.columns)}")
+        logger.info(f"  X_train head:\n{X.head(3).to_string()}")
         self.model.fit(X, y)
         self._is_fit = True
         logger.success(f"BaselineLinear: trained on {len(X)} rows, {len(self.features)} features.")
@@ -277,7 +273,7 @@ class RandomForestModel:
         self._is_fit = False
 
     def fit(self, df_train: pd.DataFrame, target: str = "brent_crude") -> "RandomForestModel":
-        self.features = _safe_features(df_train, REGRESSION_FEATURES)
+        self.features = _select_features(df_train, target)
         X, y = _prepare_Xy(df_train, self.features, target)
         if len(X) == 0:
             raise ValueError("No valid rows after dropping NaN.")
@@ -335,7 +331,7 @@ class XGBoostModel:
         self._is_fit = False
 
     def fit(self, df_train: pd.DataFrame, target: str = "brent_crude") -> "XGBoostModel":
-        self.features = _safe_features(df_train, REGRESSION_FEATURES)
+        self.features = _select_features(df_train, target)
         X, y = _prepare_Xy(df_train, self.features, target)
         if len(X) == 0:
             raise ValueError("No valid rows after dropping NaN.")
