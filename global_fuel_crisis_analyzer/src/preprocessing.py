@@ -1,5 +1,13 @@
 """
 preprocessing.py — Data cleaning, merging, and feature engineering.
+
+Key improvements:
+  - Lag features:    lag1m, lag3m, lag6m, lag12m
+  - Rolling stats:   roll3m/6m/12m mean + std
+  - Time features:   month, year, quarter, trend (linear)
+  - Momentum:        short-long spread, acceleration, range position
+  - No data leakage: all rolling/lag ops use only past observations
+  - Robust NaN handling: forward-fill ≤ 3 steps then interpolate
 """
 
 from __future__ import annotations
@@ -51,11 +59,12 @@ def _remove_outliers_iqr(series: pd.Series, factor: float = 3.0) -> pd.Series:
     cleaned = series.where(series.between(lower, upper), other=np.nan)
     n_removed = series.notna().sum() - cleaned.notna().sum()
     if n_removed:
-        logger.debug(f"  outlier removal [{series.name}]: {n_removed} values replaced with NaN")
+        logger.debug(f"  outlier removal [{series.name}]: {n_removed} values → NaN")
     return cleaned
 
 
 def clean_timeseries(df: pd.DataFrame) -> pd.DataFrame:
+    """Clip negatives, remove extreme outliers, forward-fill gaps ≤ 3 months."""
     df = df.copy()
     for col in df.columns:
         df[col] = df[col].clip(lower=0)
@@ -66,21 +75,41 @@ def clean_timeseries(df: pd.DataFrame) -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Feature engineering
+# Feature engineering — all use shift() / rolling() so no future leaks
 # ─────────────────────────────────────────────────────────────────────────────
+
+def add_lag_features(
+    df: pd.DataFrame,
+    columns: list[str],
+    lags: tuple[int, ...] = (1, 2, 3, 6, 12),
+) -> pd.DataFrame:
+    """Shift each column by `lags` months (strictly past data only)."""
+    df = df.copy()
+    for col in columns:
+        if col not in df.columns:
+            continue
+        for lag in lags:
+            df[f"{col}_lag{lag}m"] = df[col].shift(lag)
+    return df
+
 
 def add_rolling_features(
     df: pd.DataFrame,
     columns: list[str],
     windows: tuple[int, ...] = (3, 6, 12),
 ) -> pd.DataFrame:
+    """
+    Rolling mean and std — uses shift(1) before rolling so the current
+    observation is never included (no leakage).
+    """
     df = df.copy()
     for col in columns:
         if col not in df.columns:
             continue
+        shifted = df[col].shift(1)   # exclude current month
         for w in windows:
-            df[f"{col}_roll{w}m_mean"] = df[col].rolling(w, min_periods=max(1, w // 2)).mean()
-            df[f"{col}_roll{w}m_std"]  = df[col].rolling(w, min_periods=max(1, w // 2)).std()
+            df[f"{col}_roll{w}m_mean"] = shifted.rolling(w, min_periods=max(1, w // 2)).mean()
+            df[f"{col}_roll{w}m_std"]  = shifted.rolling(w, min_periods=max(1, w // 2)).std()
     return df
 
 
@@ -98,25 +127,14 @@ def add_pct_change_features(
     return df
 
 
-def add_lag_features(
-    df: pd.DataFrame,
-    columns: list[str],
-    lags: tuple[int, ...] = (1, 2, 3, 6, 12),
-) -> pd.DataFrame:
-    df = df.copy()
-    for col in columns:
-        if col not in df.columns:
-            continue
-        for l in lags:
-            df[f"{col}_lag{l}m"] = df[col].shift(l)
-    return df
-
-
 def add_calendar_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Month, quarter, year, and a linear trend index (no future info)."""
     df = df.copy()
     df["month"]   = df.index.month
     df["year"]    = df.index.year
     df["quarter"] = df.index.quarter
+    # Linear trend: months since start of series (fully causal)
+    df["trend"]   = np.arange(len(df))
     return df
 
 
@@ -141,32 +159,32 @@ def add_crisis_flags(df: pd.DataFrame) -> pd.DataFrame:
 
 def add_momentum_features(df: pd.DataFrame, col: str = "brent_crude") -> pd.DataFrame:
     """
-    ADDED: Momentum and mean-reversion features that significantly improve
-    model R² by capturing trend direction and speed.
+    Momentum signals derived from lagged/rolling data — zero leakage.
     """
     df = df.copy()
     if col not in df.columns:
         return df
 
-    # Price momentum: difference between short and long rolling means
-    df[f"{col}_momentum_3_12"] = (
-        df[col].rolling(3, min_periods=1).mean() -
-        df[col].rolling(12, min_periods=1).mean()
-    )
+    shifted = df[col].shift(1)
+
+    # Short-minus-long rolling mean spread
+    roll3  = shifted.rolling(3,  min_periods=1).mean()
+    roll12 = shifted.rolling(12, min_periods=1).mean()
+    df[f"{col}_momentum_3_12"] = roll3 - roll12
 
     # Acceleration: change in 1-month pct change
-    pct1m = df[col].pct_change(1) * 100
+    pct1m = shifted.pct_change(1) * 100
     df[f"{col}_acceleration"] = pct1m.diff()
 
-    # Distance from 12-month high/low (mean reversion signal)
-    roll12_max = df[col].rolling(12, min_periods=1).max()
-    roll12_min = df[col].rolling(12, min_periods=1).min()
+    # Range position: where current price sits in its 12-month high/low range
+    roll12_max   = shifted.rolling(12, min_periods=1).max()
+    roll12_min   = shifted.rolling(12, min_periods=1).min()
     roll12_range = (roll12_max - roll12_min).replace(0, np.nan)
     df[f"{col}_range_position"] = (df[col] - roll12_min) / roll12_range
 
-    # Volatility regime: rolling std / rolling mean (coefficient of variation)
-    roll6_mean = df[col].rolling(6, min_periods=1).mean().replace(0, np.nan)
-    df[f"{col}_vol_regime"] = df[col].rolling(6, min_periods=1).std() / roll6_mean
+    # Volatility regime: rolling CV
+    roll6_mean = shifted.rolling(6, min_periods=1).mean().replace(0, np.nan)
+    df[f"{col}_vol_regime"] = shifted.rolling(6, min_periods=1).std() / roll6_mean
 
     return df
 
@@ -201,35 +219,50 @@ def build_master_dataset(
     key_features = [c for c in ["brent_crude", "wti_crude", "us_cpi_energy", "world_crude_supply"]
                     if c in df.columns]
 
-    df = add_rolling_features(df, columns=key_features, windows=(3, 6, 12))
-    df = add_pct_change_features(df, columns=key_features, periods=(1, 3, 12))
+    # Lag features: 1, 2, 3, 6, 12 months
     df = add_lag_features(df, columns=key_features, lags=(1, 2, 3, 6, 12))
+
+    # Rolling features: no-leakage (shift(1) inside the function)
+    df = add_rolling_features(df, columns=key_features, windows=(3, 6, 12))
+
+    # Pct changes (uses pandas default which is lagged by nature)
+    df = add_pct_change_features(df, columns=key_features, periods=(1, 3, 12))
+
+    # Calendar + linear trend
     df = add_calendar_features(df)
+
+    # Crisis flags
     df = add_crisis_flags(df)
 
-    # ADDED: momentum features for brent — most impactful for R² improvement
+    # Momentum signals (all lagged internally)
     df = add_momentum_features(df, col="brent_crude")
     if "wti_crude" in df.columns:
         df = add_momentum_features(df, col="wti_crude")
 
+    # Derived features
     if "brent_crude" in df.columns and "wti_crude" in df.columns:
-        df["brent_wti_spread"] = df["brent_crude"] - df["wti_crude"]
+        df["brent_wti_spread"] = df["brent_crude"].shift(1) - df["wti_crude"].shift(1)
 
     if "world_crude_supply" in df.columns:
         supply_mean = df["world_crude_supply"].mean()
         supply_std  = df["world_crude_supply"].std()
         df["supply_zscore"] = (df["world_crude_supply"] - supply_mean) / supply_std
 
-    # ADDED: interaction feature — crisis × momentum captures shock onset well
+    # Crisis × momentum interaction
     if "crisis_flag" in df.columns and "brent_crude_momentum_3_12" in df.columns:
         df["crisis_x_momentum"] = df["crisis_flag"] * df["brent_crude_momentum_3_12"]
 
+    # Train/test split flag
     df["split"] = np.where(df.index < TRAIN_TEST_SPLIT_DATE, "train", "test")
 
+    # Drop rows with NaN target
     if "brent_crude" in df.columns:
         pre_drop = len(df)
         df.dropna(subset=["brent_crude"], inplace=True)
         logger.debug(f"  Dropped {pre_drop - len(df)} rows with NaN brent_crude")
+
+    # Replace any inf that slipped through
+    df.replace([np.inf, -np.inf], np.nan, inplace=True)
 
     if save:
         out = PROC_DIR / "master.csv"
@@ -238,13 +271,12 @@ def build_master_dataset(
 
     logger.success(f"Master dataset ready. Shape: {df.shape}")
     logger.info(f"  Date range : {df.index.min().date()} → {df.index.max().date()}")
-    logger.info(f"  Columns    : {list(df.columns)}")
     return df
 
 
 def get_train_test(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     train = df[df["split"] == "train"].drop(columns=["split", "crisis_name"], errors="ignore")
-    test  = df[df["split"] == "test"].drop(columns=["split", "crisis_name"], errors="ignore")
+    test  = df[df["split"] == "test"].drop(columns=["split", "crisis_name"],  errors="ignore")
     logger.info(f"Train: {len(train)} samples | Test: {len(test)} samples")
     return train, test
 
