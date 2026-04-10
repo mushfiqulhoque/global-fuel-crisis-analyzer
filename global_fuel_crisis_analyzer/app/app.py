@@ -35,7 +35,7 @@ from visualization import (
     plotly_scenario_sweep,
 )
 
-# ── Page config ────────────────────────────────────────────────────────────────
+# ── Page configuration ─────────────────────────────────────────────────────────
 st.set_page_config(
     page_title="Global Fuel Crisis Analyzer",
     page_icon="⛽",
@@ -43,88 +43,36 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ── Premium CSS ────────────────────────────────────────────────────────────────
+# ── Custom CSS (works in both light and dark mode) ─────────────────────────────
 st.markdown("""
 <style>
-  /* ── Base ── */
-  [data-testid="stAppViewContainer"] { background: #0f1117; }
-  [data-testid="stSidebar"]          { background: #161b27; border-right: 1px solid #1e2535; }
-
-  /* ── Typography ── */
-  h1 { font-size: 2rem !important; font-weight: 800 !important;
-       letter-spacing: -0.5px; color: #f0f4ff !important; }
-  h2 { font-size: 1.25rem !important; font-weight: 700 !important;
-       color: #e0e6ff !important; margin-top: 1.5rem !important; }
-  h3 { font-size: 1rem !important; font-weight: 600 !important; color: #c0c8e0 !important; }
-
-  /* ── Metric cards ── */
-  .kpi-card {
-    background: linear-gradient(135deg, #1a2035 0%, #1e2740 100%);
-    border: 1px solid #2a3550;
-    border-radius: 12px;
-    padding: 18px 22px;
-    margin: 4px 0;
-    transition: border-color 0.2s;
-  }
-  .kpi-card:hover { border-color: #FF6F00; }
-  .kpi-card .label { font-size: 0.75rem; color: #8892a4; text-transform: uppercase;
-                      letter-spacing: 0.08em; margin-bottom: 6px; }
-  .kpi-card .value { font-size: 2rem; font-weight: 800; color: #FF6F00;
-                      line-height: 1.1; margin: 0; }
-  .kpi-card .sub   { font-size: 0.78rem; color: #6b7688; margin-top: 4px; }
-
-  /* ── Insight cards ── */
-  .insight-card {
-    background: #131929;
-    border-left: 3px solid #FF6F00;
-    border-radius: 0 8px 8px 0;
-    padding: 12px 16px;
-    margin: 6px 0;
-  }
-  .insight-card .insight-title { font-size: 0.7rem; font-weight: 700;
-    text-transform: uppercase; letter-spacing: 0.1em; color: #FF6F00; margin-bottom: 4px; }
-  .insight-card .insight-body  { font-size: 0.88rem; color: #c8d0e0; line-height: 1.5; }
-
-  /* ── Section divider ── */
-  .section-title {
-    font-size: 0.7rem; font-weight: 700; letter-spacing: 0.15em;
-    text-transform: uppercase; color: #FF6F00;
-    border-bottom: 1px solid #1e2a40; padding-bottom: 6px;
-    margin: 1.5rem 0 0.8rem 0;
-  }
-
-  /* ── Sidebar labels ── */
-  .sidebar-label { font-size: 0.7rem; font-weight: 700; letter-spacing: 0.12em;
-                   text-transform: uppercase; color: #FF6F00; margin-bottom: 2px; }
-
-  /* ── Tab strip ── */
-  [data-testid="stTabs"] button {
-    font-weight: 600 !important; font-size: 0.85rem !important; color: #8892a4 !important;
-  }
-  [data-testid="stTabs"] button[aria-selected="true"] {
-    color: #FF6F00 !important; border-bottom-color: #FF6F00 !important;
-  }
-
-  /* ── Tables ── */
-  [data-testid="stDataFrame"] { border-radius: 8px; overflow: hidden; }
-
-  /* ── Buttons ── */
-  .stButton > button {
-    background: linear-gradient(135deg, #FF6F00, #e65c00) !important;
-    color: white !important; border: none !important; border-radius: 8px !important;
-    font-weight: 700 !important; letter-spacing: 0.05em !important;
-  }
-  .stButton > button:hover { opacity: 0.9 !important; }
+    .metric-card {
+        border: 1px solid rgba(128, 128, 128, 0.25);
+        border-radius: 10px;
+        padding: 16px 20px;
+        margin: 6px 0;
+    }
+    .metric-card h2 { color: #FF6F00; font-size: 2rem; margin: 0; }
+    .metric-card p  { font-size: 0.85rem; margin: 0; opacity: 0.75; }
+    .crisis-badge {
+        border: 1px solid #D32F2F; color: #D32F2F;
+        border-radius: 20px; padding: 2px 10px; font-size: 0.78rem;
+    }
+    .sidebar-header {
+        font-size: 1.1rem; font-weight: 700;
+        color: #FF6F00; letter-spacing: 0.05em;
+    }
 </style>
 """, unsafe_allow_html=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Data loading
+# Data loading helpers (cached)
 # ─────────────────────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=3600)
 def load_master() -> pd.DataFrame:
+    """Load the processed master dataset or fall back to synthetic data."""
     master_path = PROC_DIR / "master.csv"
     if master_path.exists():
         df = pd.read_csv(master_path, index_col="date", parse_dates=True)
@@ -134,7 +82,19 @@ def load_master() -> pd.DataFrame:
 
 
 def _synthetic_master() -> pd.DataFrame:
-    """Realistic synthetic oil prices 2000–2026 with geopolitical events."""
+    """
+    Generate realistic synthetic oil price data 2000–2026.
+
+    Geopolitical events modelled:
+      • 2008 GFC spike & crash
+      • 2014–2016 OPEC price war
+      • 2020 COVID crash & recovery
+      • 2022 Russia–Ukraine war spike
+      • 2023 Israel–Hamas war (Oct 7 attack)
+      • 2024 Iran–Israel direct strikes
+      • 2025 US–Iran tensions / Red Sea disruption
+      • 2025–2026 gradual normalisation
+    """
     rng   = np.random.default_rng(42)
     dates = pd.date_range("2000-01-01", "2026-03-01", freq="MS")
     n     = len(dates)
@@ -157,9 +117,16 @@ def _synthetic_master() -> pd.DataFrame:
         ("2022-02-01", "2022-08-31",  40),
         ("2022-09-01", "2022-12-31",  -8),
         ("2023-10-01", "2023-12-31",  12),
+        ("2024-01-01", "2024-03-31",   8),
         ("2024-04-01", "2024-04-30",  14),
+        ("2024-05-01", "2024-07-31",  -6),
+        ("2024-08-01", "2024-09-30",  -5),
         ("2024-10-01", "2024-10-31",  10),
+        ("2024-11-01", "2024-12-31",  -8),
         ("2025-01-01", "2025-03-31",   6),
+        ("2025-04-01", "2025-06-30",  -4),
+        ("2025-07-01", "2025-09-30",   3),
+        ("2025-10-01", "2025-12-31",  -5),
         ("2026-01-01", "2026-03-01",  -3),
     ]
     for start, end, bump in events:
@@ -169,6 +136,7 @@ def _synthetic_master() -> pd.DataFrame:
             price[idx] += np.linspace(0, bump, len(idx))
 
     price = np.clip(price, 15, 145)
+
     df = pd.DataFrame({
         "brent_crude":   price,
         "wti_crude":     np.clip(price - rng.uniform(1.5, 4.5, n), 12, 140),
@@ -197,39 +165,90 @@ def _synthetic_master() -> pd.DataFrame:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Build features from raw master df (used by Model Comparison tab)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _build_features(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Add all lag, rolling, and pct-change features needed by modeling.py.
+    Works on both real (from master.csv) and synthetic DataFrames.
+    """
+    df = df.copy()
+
+    for col in ["brent_crude", "wti_crude"]:
+        if col not in df.columns:
+            continue
+        for lag in [1, 2, 3, 6, 12]:
+            df[f"{col}_lag{lag}m"] = df[col].shift(lag)
+        for w in [3, 6, 12]:
+            df[f"{col}_roll{w}m_mean"] = df[col].rolling(w, min_periods=1).mean()
+            df[f"{col}_roll{w}m_std"]  = df[col].rolling(w, min_periods=1).std()
+        for p in [1, 3, 12]:
+            df[f"{col}_pct{p}m"] = df[col].pct_change(p) * 100
+
+    # Spread
+    if "brent_crude" in df.columns and "wti_crude" in df.columns:
+        df["brent_wti_spread"] = df["brent_crude"] - df["wti_crude"]
+
+    # Calendar
+    df["month"]   = df.index.month
+    df["quarter"] = df.index.quarter
+
+    return df
+
+
+def _split_train_test(df: pd.DataFrame, split_date: str = "2022-01-01"):
+    """Split on date, drop rows with NaN in core lag columns."""
+    cols_needed = [
+        "brent_crude", "brent_crude_lag1m", "brent_crude_lag3m",
+        "brent_crude_roll3m_mean", "wti_crude_lag1m",
+    ]
+    existing = [c for c in cols_needed if c in df.columns]
+    df_clean = df.dropna(subset=existing)
+    train = df_clean[df_clean.index < split_date]
+    test  = df_clean[df_clean.index >= split_date]
+    return train, test
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Sidebar
 # ─────────────────────────────────────────────────────────────────────────────
 
 def render_sidebar() -> dict:
     with st.sidebar:
         st.markdown("## ⛽ Fuel Crisis Analyzer")
-        st.caption("Global supply shock impact simulator")
         st.markdown("---")
+        st.markdown('<p class="sidebar-header">🌍 Country Settings</p>', unsafe_allow_html=True)
 
-        st.markdown('<p class="sidebar-label">🌍 Country</p>', unsafe_allow_html=True)
         country_options = {v["name"]: k for k, v in COUNTRIES.items()}
-        selected_name   = st.selectbox(
-            "Select Country", options=sorted(country_options.keys()),
+        selected_country_name = st.selectbox(
+            "Select Country",
+            options=sorted(country_options.keys()),
             index=sorted(country_options.keys()).index("United States"),
-            label_visibility="collapsed",
         )
-        selected_iso3 = country_options[selected_name]
+        selected_iso3 = country_options[selected_country_name]
 
-        st.markdown("---")
-        st.markdown('<p class="sidebar-label">🔥 Crisis Parameters</p>', unsafe_allow_html=True)
-        crisis_severity = st.slider("Supply Drop (%)", 1, 50, 15, 1,
-            help="Global crude oil supply reduction as a percentage")
-        base_price = st.number_input("Brent Price (USD/bbl)", 20.0, 200.0, 85.0, 0.5)
+        st.markdown('<p class="sidebar-header">🔥 Crisis Parameters</p>', unsafe_allow_html=True)
+        crisis_severity = st.slider(
+            "Supply Drop (%)", min_value=1, max_value=50, value=15, step=1,
+            help="Percentage reduction in global crude oil supply",
+        )
+        base_price = st.number_input(
+            "Current Brent Price (USD/bbl)",
+            min_value=20.0, max_value=200.0, value=85.0, step=0.5,
+        )
 
-        st.markdown("---")
-        st.markdown('<p class="sidebar-label">🚗 Household Usage</p>', unsafe_allow_html=True)
-        monthly_litres = st.number_input("Monthly Fuel (litres)", 10.0, 500.0, 60.0, 5.0)
+        st.markdown('<p class="sidebar-header">🚗 Household Fuel Usage</p>', unsafe_allow_html=True)
+        monthly_litres = st.number_input(
+            "Monthly Fuel Consumption (litres)",
+            min_value=10.0, max_value=500.0, value=60.0, step=5.0,
+        )
 
         st.markdown("---")
         run_sim = st.button("🚀 Run Simulation", use_container_width=True, type="primary")
 
     return {
-        "country_name":    selected_name,
+        "country_name":    selected_country_name,
         "iso3":            selected_iso3,
         "crisis_severity": crisis_severity,
         "base_price":      base_price,
@@ -239,87 +258,21 @@ def render_sidebar() -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Insight generator
-# ─────────────────────────────────────────────────────────────────────────────
-
-def _render_insights(result, params: dict) -> None:
-    """Render 4 auto-generated insight cards from simulation results."""
-    df = result.to_dataframe()
-
-    # Most affected country
-    top = df.loc[df["retail_price_pct"].idxmax()]
-    # Least affected
-    bot = df.loc[df["retail_price_pct"].idxmin()]
-    # Selected country
-    sel = df[df["iso3"] == params["iso3"]].iloc[0] if params["iso3"] in df["iso3"].values else None
-    # Average CPI impact
-    avg_cpi = df["inflation_contribution"].mean()
-
-    st.markdown('<p class="section-title">📌 Key Insights</p>', unsafe_allow_html=True)
-    c1, c2 = st.columns(2)
-
-    with c1:
-        st.markdown(f"""
-        <div class="insight-card">
-          <div class="insight-title">Most Exposed Country</div>
-          <div class="insight-body">
-            <strong>{top['name']}</strong> faces the largest retail price increase —
-            <strong>{top['retail_price_pct']:+.1f}%</strong> at pump — due to high import
-            dependence and limited subsidy buffers.
-          </div>
-        </div>""", unsafe_allow_html=True)
-
-        st.markdown(f"""
-        <div class="insight-card">
-          <div class="insight-title">CPI Inflation Impact</div>
-          <div class="insight-body">
-            A <strong>{params['crisis_severity']}% supply shock</strong> adds an estimated
-            <strong>+{avg_cpi:.3f} pp</strong> to average CPI across modelled economies.
-            Energy's ~5.5% weight in CPI amplifies fuel shocks into broad price pressure.
-          </div>
-        </div>""", unsafe_allow_html=True)
-
-    with c2:
-        st.markdown(f"""
-        <div class="insight-card">
-          <div class="insight-title">Most Insulated Country</div>
-          <div class="insight-body">
-            <strong>{bot['name']}</strong> shows the lowest exposure at
-            <strong>{bot['retail_price_pct']:+.1f}%</strong>, reflecting domestic production,
-            state pricing controls, or deep strategic reserves.
-          </div>
-        </div>""", unsafe_allow_html=True)
-
-        if sel is not None:
-            st.markdown(f"""
-            <div class="insight-card">
-              <div class="insight-title">Your Selected Country — {sel['name']}</div>
-              <div class="insight-body">
-                Retail price rises <strong>{sel['retail_price_pct']:+.1f}%</strong>
-                (${sel['retail_price_delta']:+.4f}/L), adding
-                <strong>${sel['monthly_cost_increase']:+.2f}/month</strong> for
-                {params['monthly_litres']:.0f} L usage.
-                CPI contribution: <strong>{sel['inflation_contribution']:+.4f} pp</strong>.
-              </div>
-            </div>""", unsafe_allow_html=True)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Tab 1 — Supply Shock Simulator
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tab_simulator(params: dict, master_df: pd.DataFrame) -> None:
-    st.markdown("## 🔥 Supply Shock Simulator")
+    st.header("🔥 Supply Shock Simulator")
     st.caption(
-        "Model a global crude oil supply disruption and trace its impact through "
-        "wholesale prices, retail pump costs, and household budgets."
+        "Model a global crude oil supply disruption and see how it propagates "
+        "to retail fuel prices and household costs across countries."
     )
 
     if not params["run_sim"]:
-        st.info("👈  Configure parameters in the sidebar and click **Run Simulation** to begin.")
+        st.info("👈 Configure parameters in the sidebar and click **Run Simulation**.")
         if "brent_crude" in master_df.columns:
             latest = master_df["brent_crude"].dropna().iloc[-1]
-            st.metric("Latest Brent Crude (Mar 2026)", f"${latest:.2f}/bbl")
+            st.metric("Latest Brent Crude Price (Mar 2026)", f"${latest:.2f}/bbl")
         return
 
     with st.spinner("Running simulation …"):
@@ -329,58 +282,44 @@ def tab_simulator(params: dict, master_df: pd.DataFrame) -> None:
             monthly_litres=params["monthly_litres"],
         )
 
-    # ── KPI row ───────────────────────────────────────────────────────────────
-    st.markdown('<p class="section-title">📊 Simulation Results</p>', unsafe_allow_html=True)
     col1, col2, col3, col4 = st.columns(4)
-
     with col1:
         st.markdown(f"""
-        <div class="kpi-card">
-          <div class="label">Shocked Brent Price</div>
-          <div class="value">${result.shocked_brent_price:.2f}</div>
-          <div class="sub">was ${result.base_brent_price:.2f} /bbl</div>
+        <div class="metric-card">
+          <p>Brent Crude (Shocked)</p>
+          <h2>${result.shocked_brent_price:.2f}</h2>
+          <p>was ${result.base_brent_price:.2f}/bbl</p>
         </div>""", unsafe_allow_html=True)
-
     with col2:
         sign = "+" if result.brent_price_delta > 0 else ""
         st.markdown(f"""
-        <div class="kpi-card">
-          <div class="label">Price Change</div>
-          <div class="value">{sign}{result.brent_price_delta:.2f}</div>
-          <div class="sub">{sign}{result.brent_price_pct:.1f}% USD/bbl</div>
+        <div class="metric-card">
+          <p>Price Change</p>
+          <h2>{sign}{result.brent_price_delta:.2f}</h2>
+          <p>{sign}{result.brent_price_pct:.1f}% USD/bbl</p>
         </div>""", unsafe_allow_html=True)
-
     with col3:
         st.markdown(f"""
-        <div class="kpi-card">
-          <div class="label">Avg CPI Impact</div>
-          <div class="value">+{result.global_inflation_proxy:.3f}</div>
-          <div class="sub">percentage points</div>
+        <div class="metric-card">
+          <p>Global CPI Impact</p>
+          <h2>+{result.global_inflation_proxy:.3f} pp</h2>
+          <p>Average across countries</p>
         </div>""", unsafe_allow_html=True)
-
     with col4:
         country_impact = next(
             (c for c in result.country_impacts if c.iso3 == params["iso3"]), None
         )
         if country_impact:
             st.markdown(f"""
-            <div class="kpi-card">
-              <div class="label">{country_impact.name} Monthly Δ</div>
-              <div class="value">${country_impact.monthly_cost_increase:+.2f}</div>
-              <div class="sub">per {params['monthly_litres']:.0f} L/month</div>
+            <div class="metric-card">
+              <p>{country_impact.name} Monthly Cost Δ</p>
+              <h2>${country_impact.monthly_cost_increase:+.2f}</h2>
+              <p>per {params['monthly_litres']:.0f} L/month</p>
             </div>""", unsafe_allow_html=True)
 
-    st.markdown("<br>", unsafe_allow_html=True)
+    st.markdown("---")
 
-    # ── Insights ──────────────────────────────────────────────────────────────
-    _render_insights(result, params)
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── Charts ────────────────────────────────────────────────────────────────
-    st.markdown('<p class="section-title">🌍 Country Impact</p>', unsafe_allow_html=True)
     col_a, col_b = st.columns([3, 2])
-
     with col_a:
         impact_df = result.to_dataframe()
         fig = plotly_country_impact(
@@ -390,16 +329,13 @@ def tab_simulator(params: dict, master_df: pd.DataFrame) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
     with col_b:
-        st.markdown("#### Country Detail")
+        st.subheader("Country Detail")
         if country_impact:
             detail_data = {
                 "Metric": [
-                    "Base Retail (USD/L)",
-                    "New Retail (USD/L)",
-                    "Retail Δ (USD/L)",
-                    "Retail Δ (%)",
-                    "Monthly Cost Δ (USD)",
-                    "CPI Contribution (pp)",
+                    "Base Retail (USD/L)", "New Retail (USD/L)",
+                    "Retail Δ (USD/L)",    "Retail Δ (%)",
+                    "Monthly Cost Δ (USD)","CPI Contribution (pp)",
                 ],
                 "Value": [
                     f"${country_impact.base_retail_price_usd:.4f}",
@@ -412,31 +348,10 @@ def tab_simulator(params: dict, master_df: pd.DataFrame) -> None:
             }
             st.dataframe(pd.DataFrame(detail_data), hide_index=True, use_container_width=True)
 
-    # ── Full impact table — visible by default ─────────────────────────────
-    st.markdown('<p class="section-title">📋 Full Country Impact Table</p>', unsafe_allow_html=True)
-    st.dataframe(
-        impact_df.sort_values("retail_price_pct", ascending=False)
-        .style.format({
-            "base_retail_price_usd":  "${:.4f}",
-            "new_retail_price_usd":   "${:.4f}",
-            "retail_price_delta":     "${:+.4f}",
-            "retail_price_pct":       "{:+.2f}%",
-            "monthly_cost_increase":  "${:+.2f}",
-            "inflation_contribution": "{:+.4f}",
-        }),
-        use_container_width=True,
-        height=420,
-    )
-
-    st.markdown("<br>", unsafe_allow_html=True)
-
-    # ── Scenario sweep ────────────────────────────────────────────────────────
-    st.markdown('<p class="section-title">📈 Multi-Scenario Sensitivity Analysis</p>', unsafe_allow_html=True)
+    st.markdown("---")
+    st.subheader("Multi-Scenario Sensitivity Analysis")
     with st.spinner("Running sweep across 5–30% disruption range …"):
-        sweep = run_scenario_sweep(
-            drops=[5, 10, 15, 20, 25, 30],
-            base_price=params["base_price"],
-        )
+        sweep = run_scenario_sweep(drops=[5, 10, 15, 20, 25, 30], base_price=params["base_price"])
 
     c1, c2 = st.columns(2)
     with c1:
@@ -444,13 +359,27 @@ def tab_simulator(params: dict, master_df: pd.DataFrame) -> None:
     with c2:
         st.plotly_chart(plotly_shock_heatmap(sweep), use_container_width=True)
 
+    with st.expander("📄 View Full Impact Table"):
+        st.dataframe(
+            impact_df.sort_values("retail_price_pct", ascending=False)
+            .style.format({
+                "base_retail_price_usd": "${:.4f}",
+                "new_retail_price_usd":  "${:.4f}",
+                "retail_price_delta":    "${:+.4f}",
+                "retail_price_pct":      "{:+.2f}%",
+                "monthly_cost_increase": "${:+.2f}",
+                "inflation_contribution":"{:+.4f}",
+            }),
+            use_container_width=True,
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Tab 2 — Historical Explorer
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tab_history(master_df: pd.DataFrame) -> None:
-    st.markdown("## 📈 Historical Oil Price Explorer")
+    st.header("📈 Historical Oil Price Explorer")
 
     if "brent_crude" not in master_df.columns:
         st.warning("No historical data loaded.")
@@ -479,14 +408,14 @@ def tab_history(master_df: pd.DataFrame) -> None:
         ))
 
     crisis_meta = [
-        ("2003-02-01", "2003-06-30", "Gulf War II",          "rgba(211,47,47,0.10)"),
-        ("2007-06-01", "2008-12-31", "GFC Spike",            "rgba(255,111,0,0.10)"),
-        ("2011-01-01", "2012-06-30", "Arab Spring",          "rgba(21,101,192,0.10)"),
-        ("2014-07-01", "2016-03-31", "OPEC Price War",       "rgba(46,125,50,0.10)"),
-        ("2020-01-01", "2020-06-30", "COVID Crash",          "rgba(106,27,154,0.10)"),
-        ("2022-02-01", "2022-12-31", "Ukraine War",          "rgba(191,54,12,0.10)"),
-        ("2023-10-01", "2024-04-30", "Israel–Hamas–Iran",    "rgba(183,28,28,0.13)"),
-        ("2025-01-01", "2025-06-30", "US–Iran Tensions",     "rgba(130,0,0,0.10)"),
+        ("2003-02-01", "2003-06-30", "Gulf War II",        "rgba(211,47,47,0.12)"),
+        ("2007-06-01", "2008-12-31", "GFC Spike",          "rgba(255,111,0,0.12)"),
+        ("2011-01-01", "2012-06-30", "Arab Spring",        "rgba(21,101,192,0.12)"),
+        ("2014-07-01", "2016-03-31", "OPEC Price War",     "rgba(46,125,50,0.12)"),
+        ("2020-01-01", "2020-06-30", "COVID Crash",        "rgba(106,27,154,0.12)"),
+        ("2022-02-01", "2022-12-31", "Ukraine War",        "rgba(191,54,12,0.12)"),
+        ("2023-10-01", "2024-04-30", "Israel–Hamas–Iran",  "rgba(183,28,28,0.15)"),
+        ("2025-01-01", "2025-06-30", "US–Iran Tensions",   "rgba(130,0,0,0.12)"),
     ]
     for s, e, label, color in crisis_meta:
         try:
@@ -507,13 +436,10 @@ def tab_history(master_df: pd.DataFrame) -> None:
         height=480,
         legend=dict(x=0, y=1.1, orientation="h"),
         hovermode="x unified",
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(15,17,23,0.8)",
-        font=dict(color="#c0c8e0"),
     )
     st.plotly_chart(fig, use_container_width=True)
 
-    with st.expander("📅 Key Geopolitical Events Timeline", expanded=False):
+    with st.expander("📅 Key Geopolitical Events Timeline"):
         events_df = pd.DataFrame([
             {"Date": "Feb 2022", "Event": "Russia invades Ukraine — Brent spikes to $127/bbl"},
             {"Date": "Oct 2023", "Event": "Hamas attacks Israel (Oct 7) — Middle East risk premium returns"},
@@ -526,18 +452,18 @@ def tab_history(master_df: pd.DataFrame) -> None:
         ])
         st.dataframe(events_df, hide_index=True, use_container_width=True)
 
-    st.markdown('<p class="section-title">📊 Descriptive Statistics</p>', unsafe_allow_html=True)
+    st.subheader("Descriptive Statistics (filtered range)")
     show_cols = [c for c in ["brent_crude", "wti_crude", "natural_gas", "us_cpi_energy"]
                  if c in df_filtered.columns]
     st.dataframe(df_filtered[show_cols].describe().round(2), use_container_width=True)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Tab 3 — Model Comparison
+# Tab 3 — Model Comparison  (FIXED: builds features inline, no get_train_test)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tab_models(master_df: pd.DataFrame) -> None:
-    st.markdown("## 🤖 Model Comparison")
+    st.header("🤖 Model Comparison")
     st.caption("Train and compare Baseline Ridge, ARIMA, Random Forest, and XGBoost models.")
 
     train_button = st.button("🧠 Train All Models", type="primary")
@@ -545,25 +471,29 @@ def tab_models(master_df: pd.DataFrame) -> None:
     if train_button:
         with st.spinner("Training models … this may take 2–3 minutes."):
             try:
-                from preprocessing import get_train_test
                 from modeling import ModelComparison
-                from config import TRAIN_TEST_SPLIT_DATE
 
-                master_df_clean = master_df.replace([np.inf, -np.inf], np.nan)
-                if "split" not in master_df_clean.columns:
-                    master_df_clean["split"] = np.where(
-                        master_df_clean.index < TRAIN_TEST_SPLIT_DATE, "train", "test"
-                    )
+                # Build lag/rolling features directly from master_df
+                df_feat = _build_features(master_df)
 
-                train, test = get_train_test(master_df_clean)
+                # Split chronologically — no dependency on get_train_test
+                train, test = _split_train_test(df_feat, split_date="2022-01-01")
+
+                if len(train) == 0 or len(test) == 0:
+                    st.error(f"Split produced empty set — train:{len(train)} test:{len(test)}")
+                    return
+
                 mc = ModelComparison()
                 metrics_df, preds_df = mc.run(train, test, fit_arima=False)
 
                 st.session_state["metrics_df"] = metrics_df
                 st.session_state["preds_df"]   = preds_df
                 st.session_state["mc"]         = mc
+
             except Exception as exc:
                 st.error(f"Training failed: {exc}")
+                import traceback
+                st.code(traceback.format_exc())
                 return
 
     if "metrics_df" in st.session_state:
@@ -571,7 +501,7 @@ def tab_models(master_df: pd.DataFrame) -> None:
         preds_df   = st.session_state["preds_df"]
         mc         = st.session_state.get("mc")
 
-        st.markdown('<p class="section-title">📊 Model Performance Metrics</p>', unsafe_allow_html=True)
+        st.subheader("Model Performance Metrics")
         st.dataframe(
             metrics_df.style
                 .highlight_min(color="#1b5e20", subset=["RMSE", "MAE"])
@@ -579,7 +509,7 @@ def tab_models(master_df: pd.DataFrame) -> None:
             use_container_width=True,
         )
 
-        st.markdown('<p class="section-title">📉 Predictions vs Actual (Test Set)</p>', unsafe_allow_html=True)
+        st.subheader("Predictions vs Actual (Test Set)")
         fig = go.Figure()
         fig.add_trace(go.Scatter(
             x=preds_df.index, y=preds_df["actual"],
@@ -591,27 +521,19 @@ def tab_models(master_df: pd.DataFrame) -> None:
                 x=preds_df.index, y=preds_df[col],
                 name=col, line=dict(color=colors[i % len(colors)], width=1.5, dash="dot"),
             ))
-        fig.update_layout(
-            height=420, hovermode="x unified", yaxis_title="Brent (USD/bbl)",
-            paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(15,17,23,0.8)",
-            font=dict(color="#c0c8e0"),
-        )
+        fig.update_layout(height=420, hovermode="x unified", yaxis_title="Brent (USD/bbl)")
         st.plotly_chart(fig, use_container_width=True)
 
         if mc and "XGBoost" in mc.models:
             xgb = mc.models["XGBoost"]
-            if hasattr(xgb, "feature_importances_") and xgb.feature_importances_ is not None:
-                st.markdown('<p class="section-title">🔑 XGBoost Feature Importances</p>', unsafe_allow_html=True)
+            if hasattr(xgb, "feature_importances_"):
+                st.subheader("XGBoost Feature Importances")
                 top = xgb.feature_importances_.head(15)
                 fi_fig = go.Figure(go.Bar(
                     x=top.values[::-1], y=top.index[::-1],
                     orientation="h", marker_color="#1565C0",
                 ))
-                fi_fig.update_layout(
-                    height=400, yaxis_title="", xaxis_title="Importance",
-                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(15,17,23,0.8)",
-                    font=dict(color="#c0c8e0"),
-                )
+                fi_fig.update_layout(height=350, yaxis_title="", xaxis_title="Importance")
                 st.plotly_chart(fi_fig, use_container_width=True)
     else:
         st.info("Click **Train All Models** to train and compare models on historical data.")
@@ -622,7 +544,7 @@ def tab_models(master_df: pd.DataFrame) -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def tab_sentiment() -> None:
-    st.markdown("## 📰 News Sentiment Analysis")
+    st.header("📰 News Sentiment Analysis")
     st.caption("Analyse recent oil market headlines and track sentiment over time.")
 
     run_sentiment = st.button("📡 Fetch & Score Headlines", type="primary")
@@ -656,10 +578,7 @@ def tab_sentiment() -> None:
             marker_colors=["#2E7D32", "#FF6F00", "#D32F2F"],
             hole=0.4,
         ))
-        fig_pie.update_layout(
-            title="Sentiment Distribution", height=320,
-            paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#c0c8e0"),
-        )
+        fig_pie.update_layout(title="Sentiment Distribution", height=320)
         st.plotly_chart(fig_pie, use_container_width=True)
 
         if not daily.empty:
@@ -669,20 +588,17 @@ def tab_sentiment() -> None:
                 name="Daily Mean Polarity",
             ))
             fig_line.add_hline(y=0, line_dash="dot", line_color="gray")
-            fig_line.update_layout(
-                title="Daily Sentiment Trend", height=320, yaxis_title="Polarity Score",
-                paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(15,17,23,0.8)",
-                font=dict(color="#c0c8e0"),
-            )
+            fig_line.update_layout(title="Daily Sentiment Trend", height=320,
+                                   yaxis_title="Polarity Score")
             st.plotly_chart(fig_line, use_container_width=True)
 
-        st.markdown('<p class="section-title">📋 Headline Details</p>', unsafe_allow_html=True)
+        st.subheader("Headline Details")
         display_cols = [c for c in ["date", "source", "headline", "polarity", "label"]
                         if c in scored.columns]
         st.dataframe(
             scored[display_cols]
             .sort_values("date", ascending=False)
-            .style.map(
+            .style.applymap(
                 lambda v: "color: #4CAF50" if v == "positive" else
                           ("color: #F44336" if v == "negative" else ""),
                 subset=["label"],
@@ -701,12 +617,11 @@ def main():
     params    = render_sidebar()
     master_df = load_master()
 
-    st.markdown("# ⛽ Global Fuel Crisis Analyzer")
+    st.title("⛽ Global Fuel Crisis Analyzer")
     st.caption(
         "End-to-end data science system for analysing and predicting the impact "
         "of global fuel crises on oil prices and country-level fuel costs."
     )
-    st.markdown("---")
 
     tab1, tab2, tab3, tab4 = st.tabs([
         "🔥 Supply Shock Simulator",
