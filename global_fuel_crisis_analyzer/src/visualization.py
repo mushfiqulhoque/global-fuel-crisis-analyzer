@@ -1,17 +1,5 @@
 """
 visualization.py — All chart generation for the Global Fuel Crisis Analyzer.
-
-Produces:
-  1. oil_price_trend        — Brent / WTI historical time series with crisis bands
-  2. crisis_comparison      — Box-and-whisker: crisis vs normal periods
-  3. model_predictions      — Actual vs predicted for all models
-  4. feature_importance     — Top N features from RF / XGBoost
-  5. country_impact_bar     — Simulation retail price impact by country
-  6. supply_shock_heatmap   — Country × severity shock heatmap
-  7. scenario_sweep_lines   — Price trajectory across supply drop scenarios
-
-All functions accept an `ax` / `fig` parameter for embedding in notebooks
-or return a standalone Plotly figure for the Streamlit dashboard.
 """
 
 from __future__ import annotations
@@ -27,9 +15,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import seaborn as sns
 from loguru import logger
-from matplotlib.patches import FancyArrowPatch
 
-# ── Global Matplotlib style ────────────────────────────────────────────────────
 plt.style.use("seaborn-v0_8-whitegrid")
 PALETTE = {
     "brent":    "#D32F2F",
@@ -51,7 +37,6 @@ CRISIS_BANDS = [
 
 
 def _add_crisis_bands(ax: plt.Axes, alpha: float = 0.12) -> None:
-    """Overlay named crisis periods as shaded rectangles on a time-series axes."""
     colors = ["#FF6F00", "#C62828", "#283593", "#1B5E20", "#4A148C", "#BF360C"]
     for i, (start, end, label) in enumerate(CRISIS_BANDS):
         ax.axvspan(pd.Timestamp(start), pd.Timestamp(end),
@@ -67,15 +52,6 @@ def plot_oil_price_trend(
     ax: Optional[plt.Axes] = None,
     save_path: Optional[str] = None,
 ) -> plt.Axes:
-    """
-    Plot Brent and WTI crude prices as overlapping time series with crisis bands.
-
-    Parameters
-    ----------
-    df        : master DataFrame with 'brent_crude' and/or 'wti_crude' columns
-    ax        : optional matplotlib Axes to draw on
-    save_path : if provided, save figure to this path
-    """
     fig_created = ax is None
     if ax is None:
         fig, ax = plt.subplots(figsize=(14, 5))
@@ -88,7 +64,6 @@ def plot_oil_price_trend(
                 label="WTI Crude (USD/bbl)", alpha=0.7, ls="--")
 
     _add_crisis_bands(ax)
-
     ax.set_title("Global Crude Oil Prices 2000–Present", fontsize=14, fontweight="bold", pad=12)
     ax.set_ylabel("USD / Barrel", fontsize=11)
     ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y"))
@@ -96,11 +71,8 @@ def plot_oil_price_trend(
     ax.legend(loc="upper left", fontsize=9, ncol=4, framealpha=0.8)
     ax.yaxis.set_major_formatter(mticker.FormatStrFormatter("$%g"))
     plt.tight_layout()
-
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        logger.info(f"Saved → {save_path}")
-
     return ax
 
 
@@ -112,10 +84,6 @@ def plot_crisis_comparison(
     df: pd.DataFrame,
     save_path: Optional[str] = None,
 ) -> plt.Figure:
-    """
-    Box plots comparing Brent crude price distribution during crisis vs normal
-    periods, broken out by named crisis event.
-    """
     col = "brent_crude"
     if col not in df.columns:
         raise ValueError("DataFrame must contain 'brent_crude' column.")
@@ -129,43 +97,27 @@ def plot_crisis_comparison(
     order = [o for o in order if o in plot_df["crisis_name"].unique()]
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
-
-    # Left: box plot by crisis name
-    sns.boxplot(
-        data=plot_df,
-        x="crisis_name",
-        y=col,
-        order=order,
-        palette=["#2E7D32" if o == "normal" else "#D32F2F" for o in order],
-        ax=axes[0],
-    )
+    sns.boxplot(data=plot_df, x="crisis_name", y=col, order=order,
+                palette=["#2E7D32" if o == "normal" else "#D32F2F" for o in order],
+                ax=axes[0])
     axes[0].set_title("Price Distribution: Crisis vs Normal", fontweight="bold")
     axes[0].set_xlabel("")
     axes[0].set_ylabel("Brent (USD/bbl)")
     axes[0].tick_params(axis="x", rotation=30)
 
-    # Right: violin plot of crisis vs normal (binary)
     binary_df = plot_df.copy()
     binary_df["period"] = np.where(binary_df["crisis_name"] == "normal", "Normal", "Crisis")
-    sns.violinplot(
-        data=binary_df,
-        x="period",
-        y=col,
-        palette={"Normal": PALETTE["normal"], "Crisis": PALETTE["crisis"]},
-        inner="quartile",
-        ax=axes[1],
-    )
+    sns.violinplot(data=binary_df, x="period", y=col,
+                   palette={"Normal": PALETTE["normal"], "Crisis": PALETTE["crisis"]},
+                   inner="quartile", ax=axes[1])
     axes[1].set_title("Crisis vs Normal Periods (Violin)", fontweight="bold")
     axes[1].set_xlabel("")
     axes[1].set_ylabel("Brent (USD/bbl)")
 
     plt.suptitle("Oil Price Behaviour During Crisis Periods", y=1.02, fontsize=13, fontweight="bold")
     plt.tight_layout()
-
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        logger.info(f"Saved → {save_path}")
-
     return fig
 
 
@@ -177,13 +129,6 @@ def plot_model_predictions(
     preds_df: pd.DataFrame,
     save_path: Optional[str] = None,
 ) -> plt.Figure:
-    """
-    Multi-panel chart: actual vs predicted for each model.
-
-    Parameters
-    ----------
-    preds_df : DataFrame with 'actual' column and one column per model name.
-    """
     model_cols = [c for c in preds_df.columns if c != "actual"]
     n          = len(model_cols)
     fig, axes  = plt.subplots(n, 1, figsize=(13, 3.5 * n), sharex=True)
@@ -210,7 +155,6 @@ def plot_model_predictions(
     plt.suptitle("Model Predictions vs Actual Oil Price (Test Set)", fontsize=13,
                  fontweight="bold", y=1.01)
     plt.tight_layout()
-
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
     return fig
@@ -226,7 +170,6 @@ def plot_feature_importance(
     top_n: int = 20,
     save_path: Optional[str] = None,
 ) -> plt.Figure:
-    """Horizontal bar chart of feature importances."""
     top = importance_series.head(top_n).sort_values()
     fig, ax = plt.subplots(figsize=(9, max(4, top_n * 0.35)))
     bars = ax.barh(top.index, top.values, color="#1565C0", alpha=0.85, edgecolor="white")
@@ -242,20 +185,11 @@ def plot_feature_importance(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 5. Country impact bar chart (Plotly — used in dashboard)
+# 5. Country impact bar chart (Plotly)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plotly_country_impact(impact_df: pd.DataFrame, scenario_name: str = "") -> go.Figure:
-    """
-    Interactive Plotly bar chart of retail fuel price impact per country.
-
-    Parameters
-    ----------
-    impact_df     : result.to_dataframe() from ShockResult
-    scenario_name : title label
-    """
     df = impact_df.sort_values("retail_price_pct", ascending=True)
-
     fig = px.bar(
         df,
         x="retail_price_pct",
@@ -287,25 +221,17 @@ def plotly_country_impact(impact_df: pd.DataFrame, scenario_name: str = "") -> g
 def plotly_shock_heatmap(sweep_df: pd.DataFrame) -> go.Figure:
     """
     Heatmap: rows = countries, columns = supply drop %, values = retail Δ%.
-
-    Parameters
-    ----------
-    sweep_df : output of simulation.run_scenario_sweep()
-              expects columns: 'name', 'scenario', 'retail_price_pct'
+    sweep_df must have columns: 'name', 'scenario', 'retail_price_pct'
     """
     if sweep_df is None or sweep_df.empty:
-        fig = go.Figure()
-        fig.update_layout(title="No heatmap data available")
-        return fig
+        return go.Figure().update_layout(title="No heatmap data available")
 
-    # FIX: column is "scenario" (set in run_scenario_sweep), not "supply_drop_pct"
     pivot = sweep_df.pivot_table(
         index="name",
-        columns="scenario",
+        columns="scenario",       # FIX: column name from run_scenario_sweep
         values="retail_price_pct",
         aggfunc="first",
     )
-
     fig = px.imshow(
         pivot,
         labels=dict(x="Supply Drop (%)", y="Country", color="Retail Price Δ (%)"),
@@ -323,30 +249,26 @@ def plotly_shock_heatmap(sweep_df: pd.DataFrame) -> go.Figure:
 
 def plotly_scenario_sweep(sweep_df: pd.DataFrame, top_countries: int = 8) -> go.Figure:
     """
-    Line chart: for each country, plot retail price change across shock severities.
+    Line chart: retail price change (%) vs shock severity, one line per country.
+    Curve is nonlinear because simulation now uses tanh saturation.
 
-    Parameters
-    ----------
-    sweep_df      : output of simulation.run_scenario_sweep()
-                    expects columns: 'name', 'scenario', 'retail_price_pct'
-    top_countries : how many countries to show (those with widest impact range)
+    sweep_df must have columns: 'name', 'scenario', 'retail_price_pct'
     """
     if sweep_df is None or sweep_df.empty:
-        fig = go.Figure()
-        fig.update_layout(title="No scenario data available")
-        return fig
+        return go.Figure().update_layout(title="No scenario data available")
 
-    # FIX: column is "scenario" (set in run_scenario_sweep), not "supply_drop_pct"
+    # Select countries with the widest spread across scenarios
     range_by_country = (
         sweep_df.groupby("name")["retail_price_pct"].max()
         - sweep_df.groupby("name")["retail_price_pct"].min()
     ).nlargest(top_countries).index.tolist()
 
     df_top = sweep_df[sweep_df["name"].isin(range_by_country)].copy()
+    df_top = df_top.sort_values("scenario")
 
     fig = px.line(
         df_top,
-        x="scenario",           # FIX: was "supply_drop_pct"
+        x="scenario",            # FIX: column from run_scenario_sweep
         y="retail_price_pct",
         color="name",
         markers=True,
@@ -357,22 +279,19 @@ def plotly_scenario_sweep(sweep_df: pd.DataFrame, top_countries: int = 8) -> go.
         },
         title="Retail Fuel Price Impact vs Supply Shock Severity",
     )
-    fig.update_layout(height=400, margin=dict(t=60))
+    fig.update_layout(
+        height=400,
+        margin=dict(t=60),
+        xaxis=dict(tickmode="linear", dtick=5),
+    )
     return fig
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 8. Sentiment over time (optional, requires NLP module)
+# 8. Sentiment over time
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plotly_sentiment_trend(sentiment_df: pd.DataFrame) -> go.Figure:
-    """
-    Line chart of news sentiment score alongside oil price.
-
-    Parameters
-    ----------
-    sentiment_df : DataFrame with columns ['date', 'sentiment', 'brent_crude']
-    """
     fig = go.Figure()
     fig.add_trace(go.Scatter(
         x=sentiment_df["date"], y=sentiment_df["brent_crude"],
