@@ -1,5 +1,12 @@
 """
 modeling.py — Multi-model forecasting pipeline for Brent crude oil prices.
+
+Improvements:
+  - Feature list matches preprocessing output (lag1/3/6, rolling, trend)
+  - max_features=0.4 (RF) and colsample_bytree=0.5 (XGB) spread importance
+  - _clean_X() sanitises inf/NaN before every fit/predict
+  - Ridge alpha=10 prevents negative R² from noisy-feature overfitting
+  - Validation split uses last 15% of train (no leakage into test)
 """
 
 from __future__ import annotations
@@ -12,7 +19,7 @@ import joblib
 import numpy as np
 import pandas as pd
 from loguru import logger
-from sklearn.ensemble import RandomForestRegressor, GradientBoostingRegressor
+from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import Ridge
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
 from sklearn.pipeline import Pipeline
@@ -27,8 +34,6 @@ from config import (
     ARIMA_ORDER,
     ARIMA_SEASONAL_ORDER,
     PROC_DIR,
-    RF_PARAMS,
-    XGB_PARAMS,
 )
 
 MODEL_DIR = PROC_DIR / "models"
@@ -53,27 +58,25 @@ def evaluate_predictions(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Feature list
+# Feature list — ordered by expected importance
+# All are causal (lagged/rolled), so no leakage
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Ordered by expected predictive value — lag features are most important for
-# time series, then rolling stats, then pct changes, then macro/calendar.
-# Keeping the list wide so importance is distributed across multiple features.
 REGRESSION_FEATURES = [
-    # Autoregressive lags (most predictive)
+    # Core autoregressive lags
     "brent_crude_lag1m",
     "brent_crude_lag2m",
     "brent_crude_lag3m",
     "brent_crude_lag6m",
     "brent_crude_lag12m",
-    # Rolling means — different horizons capture trend at multiple scales
+    # Rolling means (different horizons)
     "brent_crude_roll3m_mean",
     "brent_crude_roll6m_mean",
     "brent_crude_roll12m_mean",
     # Rolling volatility
     "brent_crude_roll3m_std",
     "brent_crude_roll6m_std",
-    # Momentum (3m vs 12m spread)
+    # Momentum signals
     "brent_crude_momentum_3_12",
     "brent_crude_acceleration",
     "brent_crude_range_position",
@@ -86,19 +89,19 @@ REGRESSION_FEATURES = [
     "wti_crude_lag2m",
     "wti_crude_momentum_3_12",
     "natural_gas_lag1m",
-    # Spread
+    # Spread + macro
     "brent_wti_spread",
-    # Macro
     "us_cpi_energy",
     # Supply
     "supply_zscore",
     # Crisis
     "crisis_flag",
     "crisis_x_momentum",
-    # Calendar
+    # Calendar + trend
     "month",
     "quarter",
     "year",
+    "trend",
 ]
 
 
@@ -111,7 +114,7 @@ def _safe_features(df: pd.DataFrame, wanted: list[str]) -> list[str]:
 
 
 def _clean_X(df: pd.DataFrame, features: list[str]) -> pd.DataFrame:
-    """Forward-fill then zero-fill; replace inf."""
+    """Replace inf, forward-fill then zero-fill NaN. Returns clean DataFrame."""
     X = df[features].copy()
     X = X.replace([np.inf, -np.inf], np.nan)
     X = X.ffill().fillna(0)
@@ -135,13 +138,10 @@ class BaselineLinear:
     def fit(self, df_train: pd.DataFrame, target: str = "brent_crude") -> "BaselineLinear":
         self.features = _safe_features(df_train, REGRESSION_FEATURES)
         X = _clean_X(df_train, self.features)
-        # Drop rows where target is NaN
         valid = df_train[target].notna()
-        X = X[valid]
-        y = df_train.loc[valid, target]
-        self.model.fit(X, y)
+        self.model.fit(X[valid], df_train.loc[valid, target])
         self._is_fit = True
-        logger.success(f"BaselineLinear trained on {len(X)} samples, {len(self.features)} features.")
+        logger.success(f"BaselineLinear trained — {len(X[valid])} samples, {len(self.features)} features.")
         return self
 
     def predict(self, df_test: pd.DataFrame) -> np.ndarray:
@@ -153,6 +153,7 @@ class BaselineLinear:
     def save(self, path: Optional[Path] = None) -> Path:
         path = path or MODEL_DIR / "baseline_linear.pkl"
         joblib.dump(self, path)
+        logger.info(f"Saved BaselineLinear → {path}")
         return path
 
     @classmethod
@@ -161,7 +162,7 @@ class BaselineLinear:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 2. ARIMA Forecaster
+# 2. ARIMA / SARIMA Forecaster
 # ─────────────────────────────────────────────────────────────────────────────
 
 class ARIMAForecaster:
@@ -184,10 +185,8 @@ class ARIMAForecaster:
                 enforce_invertibility=False,
             )
             self.model = sm_model.fit(disp=False)
-        self.fit_order    = (ARIMA_ORDER, ARIMA_SEASONAL_ORDER)
-        self._train_end   = series.index[-1]
-        self._train_len   = len(series)
-        self._is_fit      = True
+        self.fit_order  = (ARIMA_ORDER, ARIMA_SEASONAL_ORDER)
+        self._is_fit    = True
         logger.success(f"ARIMA trained. Order: {self.fit_order}")
         return self
 
@@ -206,6 +205,7 @@ class ARIMAForecaster:
     def save(self, path: Optional[Path] = None) -> Path:
         path = path or MODEL_DIR / "arima.pkl"
         joblib.dump(self, path)
+        logger.info(f"Saved ARIMAForecaster → {path}")
         return path
 
     @classmethod
@@ -217,13 +217,11 @@ class ARIMAForecaster:
 # 3. Random Forest
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Adjusted params: deeper trees + more estimators, but limited max_features
-# so no single feature can dominate and importance is spread across features.
 _RF_PARAMS = {
     "n_estimators":     500,
     "max_depth":        8,
     "min_samples_leaf": 3,
-    "max_features":     0.4,   # ~40% of features per split → distributes importance
+    "max_features":     0.4,   # 40% per split → distributes importance
     "random_state":     42,
     "n_jobs":           -1,
 }
@@ -241,9 +239,7 @@ class RandomForestModel:
         self.features = _safe_features(df_train, REGRESSION_FEATURES)
         X = _clean_X(df_train, self.features)
         valid = df_train[target].notna()
-        X = X[valid]
-        y = df_train.loc[valid, target]
-        self.model.fit(X, y)
+        self.model.fit(X[valid], df_train.loc[valid, target])
         self.feature_importances_ = pd.Series(
             self.model.feature_importances_, index=self.features
         ).sort_values(ascending=False)
@@ -260,6 +256,7 @@ class RandomForestModel:
     def save(self, path: Optional[Path] = None) -> Path:
         path = path or MODEL_DIR / "random_forest.pkl"
         joblib.dump(self, path)
+        logger.info(f"Saved RandomForestModel → {path}")
         return path
 
     @classmethod
@@ -304,11 +301,8 @@ class XGBoostModel:
         X_tr, X_val = X.iloc[:-val_size], X.iloc[-val_size:]
         y_tr, y_val = y.iloc[:-val_size], y.iloc[-val_size:]
 
-        self.model.fit(
-            X_tr, y_tr,
-            eval_set=[(X_val, y_val)],
-            verbose=False,
-        )
+        self.model.fit(X_tr, y_tr, eval_set=[(X_val, y_val)], verbose=False)
+
         self.feature_importances_ = pd.Series(
             self.model.feature_importances_, index=self.features
         ).sort_values(ascending=False)
@@ -325,6 +319,7 @@ class XGBoostModel:
     def save(self, path: Optional[Path] = None) -> Path:
         path = path or MODEL_DIR / "xgboost.pkl"
         joblib.dump(self, path)
+        logger.info(f"Saved XGBoostModel → {path}")
         return path
 
     @classmethod
@@ -352,7 +347,6 @@ class ModelComparison:
 
         y_true = test[self.target].values
 
-        # ── Baseline Linear ──────────────────────────────────────────────────
         logger.info("Training Baseline Linear …")
         bl = BaselineLinear().fit(train, self.target)
         self.models["Baseline (Ridge)"] = bl
@@ -361,7 +355,6 @@ class ModelComparison:
         self.predictions["Baseline (Ridge)"] = preds_bl
         self.metrics["Baseline (Ridge)"]     = evaluate_predictions(y_true, preds_bl)
 
-        # ── ARIMA ────────────────────────────────────────────────────────────
         if fit_arima:
             logger.info("Training ARIMA …")
             try:
@@ -375,7 +368,6 @@ class ModelComparison:
             except Exception as exc:
                 logger.warning(f"ARIMA training failed: {exc}")
 
-        # ── Random Forest ────────────────────────────────────────────────────
         logger.info("Training Random Forest …")
         rf = RandomForestModel().fit(train, self.target)
         self.models["Random Forest"] = rf
@@ -384,7 +376,6 @@ class ModelComparison:
         self.predictions["Random Forest"] = preds_rf
         self.metrics["Random Forest"]     = evaluate_predictions(y_true, preds_rf)
 
-        # ── XGBoost ──────────────────────────────────────────────────────────
         logger.info("Training XGBoost …")
         xgb = XGBoostModel().fit(train, self.target)
         self.models["XGBoost"] = xgb
@@ -393,7 +384,6 @@ class ModelComparison:
         self.predictions["XGBoost"] = preds_xg
         self.metrics["XGBoost"]     = evaluate_predictions(y_true, preds_xg)
 
-        # ── Summary ──────────────────────────────────────────────────────────
         metrics_df = pd.DataFrame(self.metrics).T.sort_values("RMSE")
         logger.info("\n" + metrics_df.to_string())
 
